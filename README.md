@@ -6,6 +6,9 @@ and it morphs smoothly from one to the next.
 
 Built for [heisenbert.com](https://heisenbert.com), the AI co-host for streams and recordings.
 
+**[Try the live demo](https://robert-schmidt.github.io/heisenbert-faceswap/)**: it runs in your browser and nothing is uploaded.
+Use your camera or the sample clip, swap faces, morph between them, and record a clip to download.
+
 > **Free for non-commercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
 > To use it in a commercial product or service, email **robert@chronic.ro** first.
 
@@ -20,6 +23,10 @@ Built for [heisenbert.com](https://heisenbert.com), the AI co-host for streams a
   for example about 10 times a second on an Apple M-series GPU. In between, the latest swapped face is drawn on a
   478-point face mesh that follows the current frame, so head turns, the mouth, eyes and brows move at the
   camera's full frame rate.
+- **Keeps hands in front.** A segmentation model finds face skin, so a hand, microphone or cup in front of the
+  face stays in front instead of being painted over. It runs in its own worker and never holds up the video.
+- **Checks photos.** `findFaces` finds every face in a photo, including small faces in group or full-body
+  shots, and flags what would make the result less accurate: a small, turned, blurry, dark or overexposed face.
 - **Morphs live.** Switching identity blends between the two faces over the time you choose, while recording or streaming.
 - **Fades in and out** without losing the identity (`setStrength`).
 - **Keeps the page responsive.** The engine runs in a Web Worker, and late frames are dropped instead of queued,
@@ -54,7 +61,8 @@ const camera = (await navigator.mediaDevices.getUserMedia({ video: { width: 1280
 const swapped = swap.process(camera);                  // a MediaStreamTrack
 video.srcObject = new MediaStream([swapped]);          // or MediaRecorder, or RTCPeerConnection.addTrack
 
-const embedding = await swap.setIdentity({ image: '/faces/character.png' });
+const [face] = await swap.findFaces(photo);            // biggest first; face.issues says what's off, face.preview shows it
+const embedding = await swap.setIdentity({ image: photo, face });
 // Save `embedding` (512 numbers) and pass { embedding } next time: no identity model download needed.
 
 swap.setIdentity({ image: '/faces/other.png' }, { morphMs: 1500 });  // morph while running
@@ -90,7 +98,7 @@ swapped `ImageBitmap`.
 
 | Browser | Inference | Video path |
 | --- | --- | --- |
-| Chrome, Edge (desktop) | WebGPU, WebNN (where enabled), WASM | `MediaStreamTrackProcessor` (zero-copy `VideoFrame`s) |
+| Chrome, Edge (desktop) | WebGPU, WebNN (behind `chrome://flags/#web-machine-learning-neural-network`), WASM | `MediaStreamTrackProcessor` (zero-copy `VideoFrame`s) |
 | Safari 18+ | WebGPU, WASM | canvas `captureStream` |
 | Firefox | WebGPU where enabled, otherwise WASM | canvas `captureStream` |
 
@@ -106,8 +114,10 @@ No model weights ship with this package. You host them, and their licences are s
 | `inswapper_128` (fp32 or fp16) | The swap itself | By InsightFace. Non-commercial research use; commercial licences from InsightFace |
 | `w600k_r50` (ArcFace, from InsightFace `buffalo_l`) | Turning a photo into an identity | By InsightFace. Non-commercial research use; commercial licences from InsightFace |
 | MediaPipe Face Landmarker | Finding and tracking the face (478 points) | Apache-2.0, by Google |
+| MediaPipe multiclass selfie segmenter | Keeping hands and objects in front of the face (`occlusion`, on by default) | Apache-2.0, by Google |
 
-`KNOWN_SHA256` lists the fingerprints of the public builds this library was developed and tested with.
+The MediaPipe models default to Google's hosted copies. The hosted demo loads the InsightFace models from public
+Hugging Face mirrors whose files match these fingerprints. `KNOWN_SHA256` lists the fingerprints of the public builds this library was developed and tested with.
 Identities can be stored as embeddings, so apps can offer preset faces without ever loading the ArcFace model.
 
 ## How it works
@@ -120,7 +130,8 @@ Identities can be stored as embeddings, so apps can offer preset faces without e
    (ArcFace, projected through the model's own embedding map). Morphing interpolates between two identity
    vectors on the sphere.
 4. **Blend.** The new face is colour-matched to the scene lighting. It is then drawn with WebGL on the face
-   mesh of the current frame, with a soft edge that follows the jaw and hairline.
+   mesh of the current frame, with a soft edge that follows the jaw and hairline, only where the segmenter sees
+   face skin.
 
 ## Run the demo
 
@@ -130,7 +141,10 @@ npm run demo        # dev server on http://localhost:5180 (put the model files i
 ```
 
 The demo has a built-in sample video, so it works without a camera, and runs the swap on three fictional,
-AI-generated faces.
+AI-generated faces. Pushes to `main` publish it to GitHub Pages (`.github/workflows/pages.yml`).
+
+GitHub Pages can't send cross-origin isolation headers, so the hosted demo runs CPU inference on one thread.
+That only matters on computers without WebGPU.
 
 ## Use it responsibly
 
