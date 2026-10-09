@@ -1,0 +1,72 @@
+{
+  "name": "heisenbert-faceswap",
+  "version": "0.1.0",
+  "description": "Real-time face swap in the browser (WebGPU, WebNN or CPU), with live identity morphing. Built for heisenbert.com.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "type": "module",
+  "author": "Chronic Qual SRL <robert@chronic.ro> (https://heisenbert.com)",
+  "homepage": "https://github.com/robert-schmidt/heisenbert-faceswap",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robert-schmidt/heisenbert-faceswap.git"
+  },
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "source": "./src/react.ts",
+      "default": "./dist/react.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE.md",
+    "NOTICE.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "node --test src/*.test.ts",
+    "demo": "vite demo --port 5180",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.35",
+    "onnxruntime-web": "1.30.0"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "react": "19.3.0",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "vite": "8.3.4"
+  },
+  "keywords": [
+    "face swap",
+    "webgpu",
+    "webnn",
+    "onnxruntime-web",
+    "mediapipe",
+    "real-time",
+    "browser",
+    "react"
+  ],
+  "engines": {
+    "node": ">=22.6"
+  }
+}
