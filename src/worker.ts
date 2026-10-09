@@ -8,9 +8,9 @@ import * as ort from 'onnxruntime-web/all';
 import { Compositor } from './compositor.ts';
 import { candidates, sessionOptions, type Backend, type Capabilities } from './backend.ts';
 import { VectorFilter } from './filters.ts';
-import { FACE_OVAL, apply, keyPoints, similarity, template, toCanvas, type Affine } from './geometry.ts';
+import { FACE_OVAL, apply, keyPoints, similarity, template, toCanvas, type Affine, type Point } from './geometry.ts';
 import { blendLatents, extractEmap, identityLatent } from './onnx-emap.ts';
-import type { ToMain, ToWorker } from './protocol.ts';
+import type { FaceMask, ToMain, ToWorker } from './protocol.ts';
 
 const SIZE = 128;
 const BUDGET_MS = 150; // a backend slower than this per swap is skipped for the next one on the list
@@ -33,10 +33,17 @@ let strengthFrom = 0, strengthTo = 0, strengthStart = 0, strengthMs = 0;
 const smooth = new VectorFilter(3.0, 0.02);
 let busy = false;
 let compositor: Compositor;
+let latestMask: FaceMask | null = null; // from the occlusion worker, a frame or two behind
 const face = new OffscreenCanvas(SIZE, SIZE);
 const faceCtx = face.getContext('2d')!;
 const crop = new OffscreenCanvas(SIZE, SIZE);
 const cropCtx = crop.getContext('2d', { willReadFrequently: true })!;
+// A copy of the square around the face, taken while the frame is still here, so detection and the swap can
+// run after it's gone. Two of them: the live swap and photo identities never share one.
+const REGION = 384;
+type Region = { canvas: OffscreenCanvas; ctx: OffscreenCanvasRenderingContext2D };
+const makeRegion = (): Region => { const canvas = new OffscreenCanvas(REGION, REGION); return { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true })! }; };
+const liveRegion = makeRegion(), photoRegion = makeRegion();
 const maskCanvas = new OffscreenCanvas(SIZE, SIZE);
 const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })!;
 const timings: number[] = [];
@@ -92,6 +99,18 @@ function alignedPixels(source: CanvasImageSource, m: Affine, size: number) {
   cropCtx.drawImage(source, 0, 0);
   cropCtx.setTransform(1, 0, 0, 1, 0, 0);
   return cropCtx.getImageData(0, 0, size, size);
+}
+
+/** Copies the face's surroundings (1.6× the face) into `r`; returns the tracker points in that copy's pixels. */
+function snapshot(r: Region, source: CanvasImageSource, points: Float32Array) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const i of FACE_OVAL) { const x = points[i * 2], y = points[i * 2 + 1]; x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  const side = 1.6 * Math.max(x1 - x0, y1 - y0), ox = (x0 + x1 - side) / 2, oy = (y0 + y1 - side) / 2, k = REGION / side;
+  r.ctx.clearRect(0, 0, REGION, REGION);
+  r.ctx.drawImage(source, ox, oy, side, side, 0, 0, REGION, REGION);
+  const local = new Float32Array(points.length);
+  for (let i = 0; i < points.length; i += 2) { local[i] = (points[i] - ox) * k; local[i + 1] = (points[i + 1] - oy) * k; }
+  return local;
 }
 
 function toTensor(img: ImageData, mean: number, std: number) {
@@ -160,11 +179,23 @@ async function identityFromImage(bitmap: ImageBitmap, lm: Float32Array) {
     arcface = await ort.InferenceSession.create(new Uint8Array(arcfaceBytes), sessionOptions(backend === 'webnn' ? 'webgpu' : backend, caps)).catch(() =>
       ort.InferenceSession.create(new Uint8Array(arcfaceBytes!), sessionOptions('wasm', caps)));
   }
-  const kp = keyPoints(lm, bitmap.width, bitmap.height);
-  const img = alignedPixels(bitmap, similarity(kp, template(112)), 112);
+  const pts = new Float32Array((lm.length / 3) * 2);
+  for (let i = 0; i < pts.length / 2; i++) { pts[i * 2] = lm[i * 3] * bitmap.width; pts[i * 2 + 1] = lm[i * 3 + 1] * bitmap.height; }
+  const local = snapshot(photoRegion, bitmap, pts);
+  const img = alignedPixels(photoRegion.canvas, similarity(keyPoints(local, 1, 1, 2), template(112)), 112);
   const session = arcface;
   const r = await exclusive(() => session.run({ [session.inputNames[0]]: toTensor(img, 127.5, 127.5) }));
   return new Float32Array(r[session.outputNames[0]].data as Float32Array);
+}
+
+/** Align → swap, on the copy taken from the frame (which has moved on by the time this finishes). */
+async function swapJob(local: Float32Array, latent: Float32Array) {
+  const m = similarity(keyPoints(local, 1, 1, 2), template(SIZE));
+  const original = alignedPixels(liveRegion.canvas, m, SIZE);
+  const n = local.length / 2, uv = new Float32Array(n * 2);
+  for (let i = 0; i < n; i++) { const [x, y] = apply(m, [local[i * 2], local[i * 2 + 1]]); uv[i * 2] = x / SIZE; uv[i * 2 + 1] = y / SIZE; }
+  const oval = FACE_OVAL.map((i) => [uv[i * 2] * SIZE, uv[i * 2 + 1] * SIZE] as Point);
+  await swapCrop(original, faceMask(oval), latent, uv);
 }
 
 function render(frame: VideoFrame | ImageBitmap, lm: Float32Array | null, ts: number) {
@@ -180,18 +211,14 @@ function render(frame: VideoFrame | ImageBitmap, lm: Float32Array | null, ts: nu
     const latent = currentLatent();
     if (strength > 0.001 && !busy && latent && swapper) {
       busy = true;
-      const m = similarity(keyPoints(points, 1, 1, 2), template(SIZE));
-      const original = alignedPixels(frame, m, SIZE);
-      const uv = new Float32Array(n * 2);
-      for (let i = 0; i < n; i++) { const [x, y] = apply(m, [points[i * 2], points[i * 2 + 1]]); uv[i * 2] = x / SIZE; uv[i * 2 + 1] = y / SIZE; }
-      const oval = FACE_OVAL.map((i) => [uv[i * 2] * SIZE, uv[i * 2 + 1] * SIZE] as [number, number]);
-      swapCrop(original, faceMask(oval), latent, uv).catch((err) => post({ type: 'log', message: `swap failed: ${err}` })).finally(() => { busy = false; });
+      const local = snapshot(liveRegion, frame, points);
+      swapJob(local, latent).catch((err) => post({ type: 'log', message: `swap failed: ${err}` })).finally(() => { busy = false; });
     }
   } else {
     smooth.reset();
     compositor.clearFace(); // a new face appearing shouldn't get the old one's pixels
   }
-  compositor.draw(frame, w, h, points, strength);
+  compositor.draw(frame, w, h, points, strength, latestMask);
   frames++;
   const now = performance.now();
   if (now - lastStats > 1000) {
@@ -214,6 +241,7 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
       swapper = made.s; backend = made.b;
       arcfaceBytes = m.arcface ?? null;
       compositor = new Compositor(m.mesh);
+      if (m.masks) m.masks.onmessage = (ev: MessageEvent<FaceMask>) => { latestMask = ev.data; };
       post({ type: 'ready', backend, inferMs: made.ms });
     } else if (m.type === 'arcface') {
       arcfaceBytes = m.bytes;

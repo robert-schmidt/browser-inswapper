@@ -75,3 +75,20 @@ test('mesh: triangles from edges, opacity fades from the contour inwards', async
   assert.equal(triangles.length / 3, 4);
   assert.deepEqual([...weights], [0, 0, 0, 0, 0.5]);
 });
+
+test('photo checks: a sharp, frontal, well-lit face has no issues; blur, size and light are caught', async () => {
+  const { faceIssues, sharpness } = await import('./faces.ts');
+  const pts = new Float32Array(478 * 2);
+  const set = (i: number, x: number, y: number) => { pts[i * 2] = x; pts[i * 2 + 1] = y; };
+  set(33, 100, 100); set(263, 200, 100); set(234, 60, 140); set(454, 240, 140); set(1, 150, 150);
+  const checker = Array.from({ length: 112 * 112 }, (_, i) => (((i % 112) >> 2) + ((i / 112) >> 2)) % 2 ? 180 : 60);
+  assert.deepEqual(faceIssues(pts, checker, 112), []);
+  const flat = new Array(112 * 112).fill(120);
+  assert.ok(sharpness(flat, 112) < 1);
+  assert.deepEqual(faceIssues(pts, flat, 112), ['blurry']);
+  assert.deepEqual(faceIssues(pts, flat.map(() => 20), 112), ['dark', 'blurry']);
+  set(263, 130, 100);
+  assert.ok(faceIssues(pts, checker, 112).includes('small'));
+  set(263, 200, 100); set(1, 210, 150);
+  assert.ok(faceIssues(pts, checker, 112).includes('turned'));
+});

@@ -4,7 +4,7 @@
 export type Mesh = { triangles: Uint16Array; weights: Float32Array };
 
 /** `edges`: FaceLandmarker.FACE_LANDMARKS_TESSELATION. `contour`: the outline (FACE_OVAL). `fade`: opacity by ring. */
-export function buildMesh(edges: { start: number; end: number }[], contour: number[], vertices = 478, fade = [0, 0.55, 0.9]): Mesh {
+export function buildMesh(edges: { start: number; end: number }[], contour: number[], vertices = 478, fade = [0.1, 0.75]): Mesh {
   const adj = Array.from({ length: vertices }, () => new Set<number>());
   for (const { start: a, end: b } of edges) { adj[a].add(b); adj[b].add(a); }
   // Every 3-cycle of the planar mesh is a face triangle (the mesh has no separating triangles worth worrying about).

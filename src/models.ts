@@ -10,6 +10,8 @@ export type ModelSet = {
   swapperFp32?: ModelSpec;
   /** ArcFace w600k_r50: only needed to swap to a face from a photo (identities can be passed as embeddings). */
   arcface?: ModelSpec;
+  /** MediaPipe multiclass selfie segmenter (.tflite): keeps hands and objects in front of the face. Apache-2.0; defaults to Google's hosted copy. */
+  segmenter?: ModelSpec;
 };
 
 /** Fingerprints of the public builds this package was developed against. */
@@ -18,12 +20,19 @@ export const KNOWN_SHA256 = {
   swapperFp16: 'c4eccca86ad177586c85c28bf1a64a9d9ed237e283a15818d831f7facfd3f420',
   swapperFp32: 'a290273ed497312095dac48cdef20feec9d5208298223dd01288ab202b54bea7',
   arcface: '4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43',
+  segmenter: 'c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0',
 } as const;
 
 export const DEFAULT_LANDMARKER: ModelSpec = {
   url: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
   sha256: KNOWN_SHA256.landmarker,
   bytes: 3_758_596,
+};
+
+export const DEFAULT_SEGMENTER: ModelSpec = {
+  url: 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite',
+  sha256: KNOWN_SHA256.segmenter,
+  bytes: 16_371_837,
 };
 
 export type Progress = { model: string; loaded: number; total: number };

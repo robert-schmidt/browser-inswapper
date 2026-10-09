@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/react.ts', 'src/worker.ts'],
+  entry: ['src/index.ts', 'src/react.ts', 'src/worker.ts', 'src/segment-worker.ts'],
   format: ['esm'],
   dts: { entry: ['src/index.ts', 'src/react.ts'] },
   target: 'es2022',

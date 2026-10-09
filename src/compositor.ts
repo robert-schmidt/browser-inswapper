@@ -5,6 +5,7 @@
 // eyes and brows at the camera's full frame rate, instead of sliding around as a flat picture.
 
 import type { Mesh } from './mesh.ts';
+import type { FaceMask } from './protocol.ts';
 
 const FRAME_VS = `#version 300 es
 out vec2 uv;
@@ -14,7 +15,7 @@ void main() {
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 const FRAME_FS = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec2 uv;
 uniform sampler2D frame;
 out vec4 color;
@@ -32,16 +33,20 @@ void main() {
   gl_Position = vec4(pos.x / size.x * 2.0 - 1.0, 1.0 - pos.y / size.y * 2.0, 0.0, 1.0);
 }`;
 const FACE_FS = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec2 uv;
 in float w;
 uniform sampler2D face;
+uniform sampler2D skin;   // face-skin confidence over the whole frame (white when occlusion is off)
+uniform vec2 size;
 uniform float strength;
 out vec4 color;
 void main() {
   // Fade near the crop's border too, where the model has no face to draw.
   vec2 e = smoothstep(0.0, 0.06, uv) * smoothstep(0.0, 0.06, 1.0 - uv);
-  color = vec4(texture(face, uv).rgb, w * e.x * e.y * strength);
+  // Whatever isn't face skin (a hand, a mic) stays in front.
+  float s = smoothstep(0.2, 0.6, texture(skin, vec2(gl_FragCoord.x / size.x, 1.0 - gl_FragCoord.y / size.y)).r);
+  color = vec4(texture(face, uv).rgb, w * e.x * e.y * s * strength);
 }`;
 
 function program(gl: WebGL2RenderingContext, vs: string, fs: string) {
@@ -75,6 +80,7 @@ export class Compositor {
   private faceProg: WebGLProgram;
   private frameTex: WebGLTexture;
   private faceTex: WebGLTexture;
+  private skinTex: WebGLTexture;
   private vao: WebGLVertexArrayObject;
   private posBuf: WebGLBuffer;
   private texBuf: WebGLBuffer;
@@ -90,6 +96,9 @@ export class Compositor {
     this.faceProg = program(gl, FACE_VS, FACE_FS);
     this.frameTex = texture(gl);
     this.faceTex = texture(gl);
+    this.skinTex = texture(gl);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    this.setSkin(null);
     this.vao = gl.createVertexArray()!;
     gl.bindVertexArray(this.vao);
     const attr = (name: string, size: number, data: Float32Array, usage: number) => {
@@ -123,8 +132,15 @@ export class Compositor {
   }
   clearFace() { this.hasFace = false; }
 
+  private setSkin(mask: FaceMask | null) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.skinTex);
+    if (mask) gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, mask.width, mask.height, 0, gl.RED, gl.UNSIGNED_BYTE, mask.data);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([255]));
+  }
+
   /** Draws `frame`, then the face on `points` (pixels, x/y pairs for every landmark) when there is one. */
-  draw(frame: TexImageSource, width: number, height: number, points: Float32Array | null, strength: number) {
+  draw(frame: TexImageSource, width: number, height: number, points: Float32Array | null, strength: number, mask: FaceMask | null = null) {
     const gl = this.gl;
     if (this.canvas.width !== width || this.canvas.height !== height) { this.canvas.width = width; this.canvas.height = height; }
     gl.viewport(0, 0, width, height);
@@ -140,6 +156,11 @@ export class Compositor {
     gl.useProgram(this.faceProg);
     gl.uniform2f(gl.getUniformLocation(this.faceProg, 'size'), width, height);
     gl.uniform1f(gl.getUniformLocation(this.faceProg, 'strength'), strength);
+    gl.activeTexture(gl.TEXTURE1);
+    this.setSkin(mask);
+    gl.uniform1i(gl.getUniformLocation(this.faceProg, 'skin'), 1);
+    gl.uniform1i(gl.getUniformLocation(this.faceProg, 'face'), 0);
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.faceTex);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, points);
