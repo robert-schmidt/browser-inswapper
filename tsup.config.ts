@@ -7,7 +7,7 @@ export default defineConfig({
   target: 'es2022',
   clean: true,
   splitting: true,
-  external: ['react', 'onnxruntime-web', '@mediapipe/tasks-vision'],
+  external: ['react', 'onnxruntime-web', '@mediapipe/tasks-vision', 'mediabunny'],
   // Sources import './x.ts'; the published files are .js (the worker URL included).
   async onSuccess() {
     const { readFile, writeFile } = await import('node:fs/promises');

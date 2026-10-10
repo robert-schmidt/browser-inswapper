@@ -1,4 +1,4 @@
-import { createFaceSwap, ISSUE_TEXT, KNOWN_SHA256, probe, type Backend, type FaceSwap, type FoundFace } from '../src/index.ts';
+import { createFaceSwap, ISSUE_TEXT, KNOWN_SHA256, probe, type Backend, type FaceSwap, type FoundFace, type VideoScan } from '../src/index.ts';
 
 // Models: local files on a dev machine (see models/README.md), public mirrors elsewhere (the hosted demo).
 // ?models=https://…/ points at your own copies. Every file is checked against its SHA-256 either way.
@@ -37,34 +37,54 @@ void probe().then((caps) => {
     if (why) { o.disabled = true; o.textContent = `${o.dataset.label}: ${why}`; }
   }
   if (!caps.webnn) backendSel.title = 'Neural engine: in Chrome or Edge, turn on chrome://flags/#web-machine-learning-neural-network and relaunch.';
+  // Macs gain the most (Core ML): show how to switch it on.
+  $('webnnTip').hidden = caps.webnn || !/Mac/i.test(navigator.platform || navigator.userAgent);
 });
 
-async function start(track: MediaStreamTrack) {
-  stopRecording();
-  input?.stop(); swapped?.stop(); swap?.dispose();
-  input = track;
-  original.srcObject = new MediaStream([track]); original.hidden = false;
-  output.srcObject = new MediaStream([track]);
+for (const b of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
+  b.onclick = async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy!); b.textContent = 'Copied'; } catch { b.textContent = 'Select and copy'; }
+    setTimeout(() => { b.textContent = 'Copy'; }, 1500);
+  };
+}
+
+/** The engine, created on first use (camera, sample, photo or video); the backend menu recreates it. */
+async function ensureEngine() {
+  if (swap) return swap;
   status.textContent = 'Loading models…';
   progress.hidden = false;
   try {
     swap = await createFaceSwap({
       models,
       backend: backendSel.value as Backend | 'auto',
-      onProgress: (p) => { progress.max = p.total || 1; progress.value = p.loaded; status.textContent = `Loading ${p.model}… ${Math.round(p.loaded / 1e6)} MB`; },
+      onProgress: (p) => {
+        progress.max = p.total || 1; progress.value = p.loaded;
+        status.textContent = p.loaded < p.total || !swap ? `Loading ${p.model}… ${Math.round(p.loaded / 1e6)} MB` : `Ready on ${swap.backend.toUpperCase()}`;
+      },
       onStats: (s) => { stats = s; status.textContent = `${s.backend.toUpperCase()}: ${Math.round(s.fps)} fps, ${Math.round(1000 / Math.max(s.inferMs, 1))} swaps/s (${Math.round(s.inferMs)} ms), ${s.latencyMs} ms latency`; },
       onLog: (m) => { logs.push(m); console.info('[faceswap]', m); },
     });
   } catch (err) {
     status.textContent = 'Couldn’t start';
     log.textContent = (err as Error).message;
-    return;
+    return null;
   } finally { progress.hidden = true; }
-  status.textContent = `Running on ${swap.backend.toUpperCase()}`;
-  swapped = swap.process(track);
+  status.textContent = `Ready on ${swap.backend.toUpperCase()}`;
+  if (identity) await choose(identity, 0);
+  return swap;
+}
+
+async function start(track: MediaStreamTrack) {
+  stopRecording();
+  input?.stop(); swapped?.stop();
+  input = track;
+  original.srcObject = new MediaStream([track]); original.hidden = false;
+  output.srcObject = new MediaStream([track]);
+  if (!(await ensureEngine())) return;
+  status.textContent = `Running on ${swap!.backend.toUpperCase()}`;
+  swapped = swap!.process(track);
   output.srcObject = new MediaStream([swapped]);
   $<HTMLButtonElement>('rec').disabled = false;
-  if (identity) await choose(identity, 0);
 }
 
 async function choose(next: Identity, ms = Number(morph.value)) {
@@ -97,7 +117,10 @@ $('sample').onclick = async () => {
   if (!track) { log.textContent = 'This browser can’t capture video from a clip.'; return; }
   await start(track);
 };
-backendSel.onchange = () => input && start(input.clone());
+backendSel.onchange = async () => {
+  swap?.dispose(); swap = null; swapped?.stop();
+  if (input) await start(input.clone()); else await ensureEngine();
+};
 
 const faces = document.querySelector<HTMLElement>('.faces')!;
 const select = (b: HTMLButtonElement) => faces.querySelectorAll('.face').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
@@ -111,11 +134,10 @@ $<HTMLInputElement>('upload').onchange = async (e) => {
   const el = e.target as HTMLInputElement, file = el.files?.[0];
   el.value = '';
   if (!file) return;
-  if (!swap) { log.textContent = 'Start your camera or the sample video first, then add a photo.'; return; }
   const url = URL.createObjectURL(file);
   log.textContent = 'Looking for faces…';
   let found: FoundFace[];
-  try { found = await swap.findFaces(url); } catch (err) { log.textContent = (err as Error).message; return; }
+  try { found = await (await ensureEngine())!.findFaces(url); } catch (err) { log.textContent = (err as Error).message; return; }
   log.textContent = '';
   showPhoto(url, found);
 };
@@ -204,6 +226,81 @@ rec.onclick = () => {
   const timer = setInterval(() => { rec.textContent = `Stop recording (${Math.round((performance.now() - started) / 1000)} s)`; }, 500);
   rec.textContent = 'Stop recording (0 s)';
 };
+
+// Video files: find the people, choose who to replace, swap every frame, preview and download.
+let video: { file: File; scan: VideoScan; pick: Set<number> } | null = null;
+let videoAbort: AbortController | null = null;
+const vStatus = $('videoStatus'), vProgress = $<HTMLProgressElement>('videoProgress'), vGo = $<HTMLButtonElement>('videoGo');
+const vPeople = $('videoPeople'), vResult = $<HTMLVideoElement>('videoResult'), vDownload = $<HTMLAnchorElement>('videoDownload');
+const fmtTime = (s: number) => (s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`);
+
+$<HTMLInputElement>('videoFile').onchange = async (e) => {
+  const el = e.target as HTMLInputElement, file = el.files?.[0];
+  el.value = '';
+  if (!file) return;
+  video = null; vGo.disabled = true; vPeople.replaceChildren(); $('videoPeopleRow').hidden = true;
+  vResult.hidden = true; vDownload.hidden = true;
+  const engine = await ensureEngine();
+  if (!engine) return;
+  vStatus.textContent = 'Looking for people in the video…';
+  try {
+    const scan = await engine.scanVideo(file);
+    $('videoInfo').textContent = `${file.name}: ${scan.width}×${scan.height}, ${fmtTime(scan.duration)}, ${Math.round(scan.fps)} fps`;
+    if (!scan.people.length) { vStatus.textContent = 'No faces found in this video.'; return; }
+    video = { file, scan, pick: new Set(scan.people.map((p) => p.id)) };
+    for (const p of scan.people) {
+      const chip = Object.assign(document.createElement('button'), { className: 'face' });
+      const c = document.createElement('canvas');
+      c.width = c.height = 64; c.style.cssText = 'width:64px;height:64px;border-radius:8px';
+      c.getContext('2d')!.drawImage(p.preview, 0, 0, 64, 64);
+      chip.append(c, `Person ${p.id + 1}`);
+      chip.setAttribute('aria-pressed', 'true');
+      chip.onclick = () => {
+        const on = !video!.pick.has(p.id);
+        if (on) video!.pick.add(p.id); else video!.pick.delete(p.id);
+        chip.setAttribute('aria-pressed', String(on));
+        vGo.disabled = !video!.pick.size;
+      };
+      vPeople.append(chip);
+    }
+    $('videoPeopleRow').hidden = false;
+    vGo.disabled = false;
+    vStatus.textContent = `${scan.people.length === 1 ? 'One person' : `${scan.people.length} people`} found. Tap a face to leave them as they are.`;
+  } catch (err) { vStatus.textContent = (err as Error).message; }
+};
+
+vGo.onclick = async () => {
+  if (!video || !swap) return;
+  if (!identity) { vStatus.textContent = 'Choose a face to swap to first (above), or add your own photo.'; return; }
+  videoAbort = new AbortController();
+  vGo.disabled = true; $('videoCancel').hidden = false; vProgress.hidden = false; vProgress.value = 0;
+  vResult.hidden = true; vDownload.hidden = true;
+  vStatus.textContent = 'Starting…';
+  try {
+    const blob = await swap.swapVideo(video.file, {
+      people: video.scan.people,
+      swap: [...video.pick],
+      signal: videoAbort.signal,
+      onProgress: ({ progress: p, etaSeconds }) => {
+        vProgress.value = p;
+        vStatus.textContent = `${Math.round(p * 100)}%${etaSeconds !== null ? `, about ${fmtTime(etaSeconds)} left` : ''}`;
+      },
+    });
+    if (vDownload.href) URL.revokeObjectURL(vDownload.href);
+    const url = URL.createObjectURL(blob);
+    vResult.src = url; vResult.hidden = false;
+    vDownload.href = url;
+    vDownload.download = video.file.name.replace(/\.[^.]+$/, '') + '-faceswap.mp4';
+    vDownload.textContent = `Download the video (${(blob.size / 1e6).toFixed(1)} MB)`;
+    vDownload.hidden = false;
+    vStatus.textContent = 'Done.';
+  } catch (err) {
+    vStatus.textContent = videoAbort.signal.aborted ? 'Canceled.' : `Couldn’t finish: ${(err as Error).message}`;
+  } finally {
+    vGo.disabled = false; $('videoCancel').hidden = true; vProgress.hidden = true; videoAbort = null;
+  }
+};
+$('videoCancel').onclick = () => videoAbort?.abort();
 
 // For automated checks.
 Object.assign(window, { faceswapDemo: { get swap() { return swap; }, get stats() { return stats; }, logs, output, choose, start, sampleTrack, createFaceSwap, models, showPhoto } });

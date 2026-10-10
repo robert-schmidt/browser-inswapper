@@ -156,8 +156,7 @@ export class Compositor {
     else gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([255]));
   }
 
-  /** Draws `frame`, then the face on `points` (pixels, x/y pairs for every landmark) when there is one. */
-  draw(frame: TexImageSource, width: number, height: number, points: Float32Array | null, strength: number, mask: FaceMask | null = null) {
+  private drawFrame(frame: TexImageSource, width: number, height: number) {
     const gl = this.gl;
     if (this.canvas.width !== width || this.canvas.height !== height) { this.canvas.width = width; this.canvas.height = height; }
     gl.viewport(0, 0, width, height);
@@ -167,7 +166,10 @@ export class Compositor {
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    if (!points || this.current < 0 || strength <= 0.001) return;
+  }
+
+  private beginFaces(width: number, height: number, mask: FaceMask | null) {
+    const gl = this.gl;
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(this.faceProg);
@@ -176,6 +178,33 @@ export class Compositor {
     this.setSkin(mask);
     gl.uniform1i(gl.getUniformLocation(this.faceProg, 'skin'), 1);
     gl.uniform1i(gl.getUniformLocation(this.faceProg, 'face'), 0);
+  }
+
+  /** Video files: `frame` with every face drawn at full strength from its own fresh swap (no crossfade). */
+  drawStill(frame: TexImageSource, width: number, height: number, faces: { image: TexImageSource; uv: Float32Array; points: Float32Array }[], mask: FaceMask | null) {
+    const gl = this.gl;
+    this.drawFrame(frame, width, height);
+    if (!faces.length) return;
+    this.beginFaces(width, height, mask);
+    for (const f of faces) {
+      this.current = -1; this.setFace(f.image, f.uv); this.hasPrevious = false;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.points);
+      gl.uniform1f(gl.getUniformLocation(this.faceProg, 'strength'), 1);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.slots[this.current].tex);
+      gl.bindVertexArray(this.slots[this.current].vao);
+      gl.drawElements(gl.TRIANGLES, this.count, gl.UNSIGNED_SHORT, 0);
+    }
+    gl.bindVertexArray(null);
+  }
+
+  /** Draws `frame`, then the face on `points` (pixels, x/y pairs for every landmark) when there is one. */
+  draw(frame: TexImageSource, width: number, height: number, points: Float32Array | null, strength: number, mask: FaceMask | null = null) {
+    const gl = this.gl;
+    this.drawFrame(frame, width, height);
+    if (!points || this.current < 0 || strength <= 0.001) return;
+    this.beginFaces(width, height, mask);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, points);
     const cur = this.slots[this.current];

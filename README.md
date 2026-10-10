@@ -7,7 +7,10 @@ and it morphs smoothly from one to the next.
 Built for [heisenbert.com](https://heisenbert.com), the AI co-host for streams and recordings.
 
 **[Try the live demo](https://robert-schmidt.github.io/heisenbert-faceswap/)**: it runs in your browser and nothing is uploaded.
-Use your camera or the sample clip, swap faces, morph between them, and record a clip to download.
+Use your camera or the sample clip, swap faces, morph between them, and record a clip to download. Or add a
+video file: it finds the people in it, you choose who to replace, and you download the swapped video.
+
+> **On a Mac?** [Turn on WebNN](#faster-on-macs-turn-on-webnn) in Chrome for about 3× faster swaps.
 
 > **Free for non-commercial use** under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
 > To use it in a commercial product or service, email **robert@chronic.ro** first.
@@ -28,6 +31,10 @@ Use your camera or the sample clip, swap faces, morph between them, and record a
   face stays in front instead of being painted over. It runs in its own worker and never holds up the video.
 - **Checks photos.** `findFaces` finds every face in a photo, including small faces in group or full-body
   shots, and flags what would make the result less accurate: a small, turned, blurry, dark or overexposed face.
+- **Swaps faces in video files.** `scanVideo` finds the people in a clip; `swapVideo` replaces everyone, or
+  only the people you choose (recognised on every frame by identity), and returns an MP4 with the original
+  audio. Every frame gets a fresh swap, decoded and encoded by the browser's own hardware codecs (WebCodecs,
+  via [Mediabunny](https://mediabunny.dev)). Nothing is uploaded.
 - **Morphs live.** Switching identity blends between the two faces over the time you choose, while recording or streaming.
 - **Fades in and out** without losing the identity (`setStrength`).
 - **Keeps the page responsive.** The engine runs in a Web Worker, and late frames are dropped instead of queued,
@@ -71,6 +78,20 @@ swap.setStrength(0, 400);                                            // fade bac
 swap.dispose();
 ```
 
+### Video files
+
+```ts
+const scan = await swap.scanVideo(file);                 // { people, duration, width, height, fps }
+// scan.people[i].preview is a face crop for a picker; leave `swap` out to replace every face.
+await swap.setIdentity({ image: '/faces/character.png' });
+const mp4 = await swap.swapVideo(file, {
+  people: scan.people,
+  swap: [scan.people[0].id],
+  onProgress: ({ progress, etaSeconds }) => console.log(progress, etaSeconds),
+  signal: abortController.signal,
+});
+```
+
 ### React (Next.js, Remix, Vite…)
 
 ```tsx
@@ -102,7 +123,9 @@ the camera's frame rate; the faster the GPU, the more often the face itself is f
 
 | Device | Runs on | Per swap | Fresh faces per second | |
 | --- | --- | --- | --- | --- |
+| MacBook Pro, M2 Max (38-core GPU) | WebNN (Core ML, GPU) | 30 ms | ~30 (every frame) | measured |
 | MacBook Pro, M2 Max (38-core GPU) | WebGPU (Metal) | 95 ms | ~10 | measured |
+| M4 Pro (20-core GPU) | WebNN (Core ML, GPU) | 40–55 ms | 18–25 | estimate |
 | M1 / M2 (8–10-core GPU) | WebGPU (Metal) | 400–550 ms | 2–3 | estimate |
 | M4 Pro (20-core GPU) | WebGPU (Metal) | 110–150 ms | 7–9 | estimate |
 | M3 Max / M4 Max (40-core GPU) | WebGPU (Metal) | 60–80 ms | 13–16 | estimate |
@@ -118,11 +141,26 @@ Estimates scale the M2 Max measurement by each GPU's FP32 throughput, assuming W
 on this model (the M2 Max reaches about 27%). Treat them as a range, and check your own device with the demo:
 it shows fps, swaps per second and latency.
 
+Video files take one swap per face per frame, plus decoding and encoding. On the M2 Max with WebGPU, a 6-second
+720p clip (180 frames) took 26 s with one face and 41 s with two; WebNN cuts the swap part to about a third.
+
 Other numbers from the M2 Max:
 - **Latency:** 35–40 ms from a camera frame arriving to its swapped copy leaving (tracking and compositing;
   the face shown is at most one swap older).
 - **Output:** 27–30 fps with occlusion on.
 - **Startup:** the first start downloads about 300 MB; later starts load from the browser cache in 1–2 s.
+
+## Faster on Macs: turn on WebNN
+
+Chrome and Edge can run the model through Apple's Core ML (WebNN), which on an M2 Max is about 3× faster than
+WebGPU (30 ms per swap instead of 95 ms). It's still behind a flag:
+
+1. Open `chrome://flags/#web-machine-learning-neural-network` (Edge: `edge://flags`, same name).
+2. Set **Enables WebNN API** to **Enabled**, then click **Relaunch**.
+3. Keep the backend on `'auto'` (in the demo: *Fastest for this device*). It benchmarks WebGPU and WebNN once
+   and keeps the faster one.
+
+Core ML's Neural Engine on its own is slower for this model (320–535 ms): the speed-up comes from Core ML on the GPU.
 
 ## Browser support
 
@@ -176,6 +214,17 @@ AI-generated faces. Pushes to `main` publish it to GitHub Pages (`.github/workfl
 GitHub Pages can't send cross-origin isolation headers, so the hosted demo runs CPU inference on one thread.
 That only matters on computers without WebGPU.
 
+## Support the work
+
+This project is open source because I believe in open/acc. If it's useful to you and you'd like to support
+the work, donations are welcome:
+
+| Network | Address |
+| --- | --- |
+| Solana | `E8tLUC1RhBpRoF1we4onS5MkmpDQVVRvrqbE6Pyhufon` |
+| EVM (Ethereum, Base, …) | `0x8F06CE722d269567EbaEe6eA4fECE247534587A7` |
+| Bitcoin | `bc1q0jcp0e4muy53xlaxhz6pszgp8a9jpj6cmd95qh` |
+
 ## Use it responsibly
 
 Swap only faces you have the right to use (your own, or characters made for you), and label altered video as
@@ -184,6 +233,8 @@ make sexual or harassing content. Platform rules (for example YouTube's altered-
 what you publish.
 
 ## Licence
+
+Video files are read and written with [Mediabunny](https://mediabunny.dev) (MPL-2.0).
 
 Copyright Chronic Qual SRL. Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md);
 see [NOTICE.md](NOTICE.md). For commercial licensing, email robert@chronic.ro.

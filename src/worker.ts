@@ -6,6 +6,7 @@
 
 import * as ort from 'onnxruntime-web/all';
 import { Compositor } from './compositor.ts';
+import type { Mesh } from './mesh.ts';
 import { candidates, sessionOptions, type Backend, type Capabilities } from './backend.ts';
 import { VectorFilter } from './filters.ts';
 import { FACE_OVAL, apply, keyPoints, similarity, template, toCanvas, type Affine, type Point } from './geometry.ts';
@@ -13,7 +14,6 @@ import { blendLatents, extractEmap, identityLatent } from './onnx-emap.ts';
 import type { FaceMask, ToMain, ToWorker } from './protocol.ts';
 
 const SIZE = 128;
-const BUDGET_MS = 150; // a backend slower than this per swap is skipped for the next one on the list
 const COLOR_MATCH = 0.3; // pull the swapped face's mean colour this far towards the original light (1 = fully: loses skin tone)
 
 // The swap model behind one call. (ponytail: WebGPU graph capture measured within 2% of a plain run on an M2 Max,
@@ -35,19 +35,21 @@ let strengthFrom = 0, strengthTo = 0, strengthStart = 0, strengthMs = 0;
 // Light smoothing on every landmark (pixels): steadies the still face without the lag that makes it slide.
 const smooth = new VectorFilter(3.0, 0.02);
 let busy = false;
-let colorShift: number[] | null = null;
+const colorShifts = new Map<string, number[]>(); // per face (live: 'live'; video files: per tracked person)
 let compositor: Compositor;
+let stillCompositor: Compositor | null = null; // video files: separate, so a running camera swap is untouched
+let mesh: Mesh;
 let latestMask: FaceMask | null = null; // from the occlusion worker, a frame or two behind
 const face = new OffscreenCanvas(SIZE, SIZE);
 const faceCtx = face.getContext('2d')!;
 const crop = new OffscreenCanvas(SIZE, SIZE);
 const cropCtx = crop.getContext('2d', { willReadFrequently: true })!;
 // A copy of the square around the face, taken while the frame is still here, so detection and the swap can
-// run after it's gone. Two of them: the live swap and photo identities never share one.
+// run after it's gone. One per user (live swap, photo identities, video files), so they never share one.
 const REGION = 384;
 type Region = { canvas: OffscreenCanvas; ctx: OffscreenCanvasRenderingContext2D };
 const makeRegion = (): Region => { const canvas = new OffscreenCanvas(REGION, REGION); return { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true })! }; };
-const liveRegion = makeRegion(), photoRegion = makeRegion();
+const liveRegion = makeRegion(), photoRegion = makeRegion(), stillRegion = makeRegion();
 const maskCanvas = new OffscreenCanvas(SIZE, SIZE);
 const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })!;
 const timings: number[] = [];
@@ -93,7 +95,6 @@ async function createSwapper(bytes: ArrayBuffer, order: Backend[]) {
       const ms = (performance.now() - t) / 5;
       post({ type: 'log', message: `${b}: ${ms.toFixed(1)} ms per swap` });
       if (!best || ms < best.ms) { await best?.s.release(); best = { s, b, ms }; } else await s.release();
-      if (ms <= BUDGET_MS) break;
     } catch (err) {
       post({ type: 'log', message: `${b} unavailable: ${err instanceof Error ? err.message : err}` });
     }
@@ -158,7 +159,8 @@ function faceMask(ovalCrop: [number, number][]) {
 }
 
 /** Runs the swap on the current crop, colour-matches it to the original and stores it as the next patch. */
-async function swapCrop(original: ImageData, mask: Uint8ClampedArray, latent: Float32Array, uv: Float32Array) {
+/** Runs the swap on an aligned crop and colour-matches it to the original; `key` keeps each face's colour steady over time. */
+async function swapFace(original: ImageData, mask: Uint8ClampedArray, latent: Float32Array, key: string) {
   const t0 = performance.now();
   const o = await exclusive(() => swapper!.run(toFloats(original, 0, 255), latent));
   const n = SIZE * SIZE, src = original.data;
@@ -173,7 +175,9 @@ async function swapCrop(original: ImageData, mask: Uint8ClampedArray, latent: Fl
   }
   const raw = w ? [0, 1, 2].map((c) => ((mo[c] - ms[c]) / w) * COLOR_MATCH) : [0, 0, 0];
   // Smoothed over swaps, so the light on the face doesn't flicker from one result to the next.
-  const shift = colorShift = colorShift ? colorShift.map((v, c) => v + (raw[c] - v) * 0.4) : raw;
+  const prev = colorShifts.get(key);
+  const shift = prev ? prev.map((v, c) => v + (raw[c] - v) * 0.4) : raw;
+  colorShifts.set(key, shift);
   const img = new ImageData(SIZE, SIZE);
   const px = img.data;
   for (let i = 0; i < n; i++) {
@@ -182,10 +186,19 @@ async function swapCrop(original: ImageData, mask: Uint8ClampedArray, latent: Fl
     px[i * 4 + 2] = o[2 * n + i] * 255 + shift[2];
     px[i * 4 + 3] = 255;
   }
-  faceCtx.putImageData(img, 0, 0);
-  compositor.setFace(face, uv);
   timings.push(performance.now() - t0);
   if (timings.length > 30) timings.shift();
+  return img;
+}
+
+/** Aligns and swaps a face already copied into `r` (`local`: its landmarks there): the swapped face and where each landmark sits in it. */
+async function swapAt(r: Region, local: Float32Array, latent: Float32Array, key: string) {
+  const m = similarity(keyPoints(local, 1, 1, 2), template(SIZE));
+  const original = alignedPixels(r.canvas, m, SIZE);
+  const n = local.length / 2, uv = new Float32Array(n * 2);
+  for (let i = 0; i < n; i++) { const [x, y] = apply(m, [local[i * 2], local[i * 2 + 1]]); uv[i * 2] = x / SIZE; uv[i * 2 + 1] = y / SIZE; }
+  const oval = FACE_OVAL.map((i) => [uv[i * 2] * SIZE, uv[i * 2 + 1] * SIZE] as Point);
+  return { image: await swapFace(original, faceMask(oval), latent, key), uv };
 }
 
 async function identityFromImage(bitmap: ImageBitmap, lm: Float32Array) {
@@ -203,14 +216,11 @@ async function identityFromImage(bitmap: ImageBitmap, lm: Float32Array) {
   return new Float32Array(r[session.outputNames[0]].data as Float32Array);
 }
 
-/** Align → swap, on the copy taken from the frame (which has moved on by the time this finishes). */
+/** The live swap: on a copy taken from the frame (which has moved on by the time this finishes). */
 async function swapJob(local: Float32Array, latent: Float32Array) {
-  const m = similarity(keyPoints(local, 1, 1, 2), template(SIZE));
-  const original = alignedPixels(liveRegion.canvas, m, SIZE);
-  const n = local.length / 2, uv = new Float32Array(n * 2);
-  for (let i = 0; i < n; i++) { const [x, y] = apply(m, [local[i * 2], local[i * 2 + 1]]); uv[i * 2] = x / SIZE; uv[i * 2 + 1] = y / SIZE; }
-  const oval = FACE_OVAL.map((i) => [uv[i * 2] * SIZE, uv[i * 2 + 1] * SIZE] as Point);
-  await swapCrop(original, faceMask(oval), latent, uv);
+  const { image, uv } = await swapAt(liveRegion, local, latent, 'live');
+  faceCtx.putImageData(image, 0, 0);
+  compositor.setFace(face, uv);
 }
 
 function render(frame: VideoFrame | ImageBitmap, lm: Float32Array | null, ts: number) {
@@ -255,6 +265,7 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
       const made = await createSwapper(m.swapper, order);
       swapper = made.s; backend = made.b;
       arcfaceBytes = m.arcface ?? null;
+      mesh = m.mesh;
       compositor = new Compositor(m.mesh);
       if (m.masks) m.masks.onmessage = (ev: MessageEvent<FaceMask>) => { latestMask = ev.data; };
       post({ type: 'ready', backend, inferMs: made.ms });
@@ -270,6 +281,25 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
       morphStart = performance.now(); morphMs = latentFrom ? m.morphMs : 0;
       if (strengthTo === 0) { strengthFrom = currentStrength(); strengthTo = 1; strengthStart = performance.now(); strengthMs = m.morphMs || 300; }
       post({ type: 'identity', id: m.id, embedding }, [embedding.buffer]);
+    } else if (m.type === 'embed') {
+      const embeddings: Float32Array[] = [];
+      for (const lm of m.faces) embeddings.push(await identityFromImage(m.image, lm));
+      m.image.close();
+      post({ type: 'embeddings', id: m.id, embeddings }, embeddings.map((e) => e.buffer));
+    } else if (m.type === 'still') {
+      const latent = currentLatent();
+      const w = m.frame.width, h = m.frame.height;
+      const faces = [];
+      for (const f of latent ? m.faces : []) {
+        const local = snapshot(stillRegion, m.frame, f.points);
+        const { image, uv } = await swapAt(stillRegion, local, latent!, f.key);
+        faces.push({ image, uv, points: f.points });
+      }
+      stillCompositor ??= new Compositor(mesh);
+      stillCompositor.drawStill(m.frame, w, h, faces, m.mask);
+      m.frame.close();
+      const bmp = stillCompositor.canvas.transferToImageBitmap();
+      post({ type: 'frame', id: m.id, frame: bmp }, [bmp]);
     } else if (m.type === 'strength') {
       strengthFrom = currentStrength(); strengthTo = m.value; strengthStart = performance.now(); strengthMs = m.ms;
     } else if (m.type === 'frame') {

@@ -13,12 +13,15 @@ import type { ToMain, ToWorker } from './protocol.ts';
 import { buildMesh } from './mesh.ts';
 import { FACE_OVAL, keyPoints, similarity, template, toCanvas } from './geometry.ts';
 import { faceIssues, type FaceIssue } from './faces.ts';
+import type { FaceMask } from './protocol.ts';
+import type { SwapVideoOptions, VideoEngine, VideoScan } from './video.ts';
 
 export type { Backend, Capabilities } from './backend.ts';
 export type { ModelSet, ModelSpec, Progress } from './models.ts';
 export { KNOWN_SHA256, clearModelCache } from './models.ts';
 export { probe } from './backend.ts';
 export { ISSUE_TEXT, type FaceIssue } from './faces.ts';
+export type { SwapVideoOptions, VideoPerson, VideoProgress, VideoScan } from './video.ts';
 
 export type FaceSwapOptions = {
   models: ModelSet;
@@ -60,6 +63,10 @@ export type FaceSwap = {
   setIdentity(source: IdentitySource, opts?: { morphMs?: number }): Promise<Float32Array>;
   /** Every face in a photo, biggest first, with quality notes and a preview: pass one to setIdentity({ image, face }). */
   findFaces(image: ImageBitmapSource | string): Promise<FoundFace[]>;
+  /** Video files: the people in a clip (sampled across it), most seen first, to choose who to replace. */
+  scanVideo(file: Blob, opts?: { samples?: number; signal?: AbortSignal }): Promise<VideoScan>;
+  /** Video files: an MP4 with faces swapped to the current identity on every frame (audio kept). Slower than real time. */
+  swapVideo(file: Blob, opts?: SwapVideoOptions): Promise<Blob>;
   /** Fade the swap in (1) or out (0) without losing the identity. */
   setStrength(value: number, ms?: number): void;
   /** Swapped copy of a camera track. Stop the returned track (or call dispose) when done. */
@@ -97,6 +104,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   let imageLandmarker: FaceLandmarker | null = null;
   let groupLandmarker: FaceLandmarker | null = null;
   // Occlusion runs in its own worker on small copies of the frame and sends masks straight to the swap worker.
+  const segmenterCopy = segmenterBytes?.slice(0) ?? null; // for video files' own occlusion worker
   const segWorker = segmenterBytes ? new Worker(new URL('./segment-worker.ts', import.meta.url), { type: 'module', name: 'heisenbert-faceswap-occlusion' }) : null;
   const masks = new MessageChannel();
   let segIdle = false, lastSeg = 0;
@@ -148,7 +156,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   send({ type: 'init', swapper: swapBytes, backend: wanted, caps, wasmPaths: opts.ortWasmPaths ?? ORT_CDN, mesh: buildMesh(FaceLandmarker.FACE_LANDMARKS_TESSELATION, FACE_OVAL), masks: segWorker ? masks.port2 : undefined },
     segWorker ? [swapBytes, masks.port2] : [swapBytes]);
   const { backend } = await ready;
-  rememberBackend(backend);
+  if (wanted === 'auto') rememberBackend(backend); // a forced choice isn't a benchmark result
 
   let arcfaceSent = false;
   const landmarksOf = (result: { faceLandmarks: { x: number; y: number; z: number }[][] }) => {
@@ -164,6 +172,47 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const i of FACE_OVAL) { x0 = Math.min(x0, lm[i * 3] * W); x1 = Math.max(x1, lm[i * 3] * W); y0 = Math.min(y0, lm[i * 3 + 1] * H); y1 = Math.max(y1, lm[i * 3 + 1] * H); }
     return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+  };
+  const videoEngine: VideoEngine = {
+    findFaces: (image) => api.findFaces(image),
+    async embed(image, faces) {
+      if (!arcfaceSent) {
+        if (!opts.models.arcface) throw new Error('models.arcface is needed to tell people apart in a video.');
+        const bytes = await loadModel('arcface', opts.models.arcface, opts.onProgress);
+        send({ type: 'arcface', bytes }, [bytes]);
+        arcfaceSent = true;
+      }
+      const m = await request<Extract<ToMain, { type: 'embeddings' }>>((id) => ({ type: 'embed', id, image, faces }), [image]);
+      return m.embeddings;
+    },
+    async tracker() {
+      const t = await makeLandmarker('VIDEO', 6);
+      return {
+        detect: (frame, ts) => t.detectForVideo(frame as unknown as HTMLVideoElement, ts).faceLandmarks.map((f) => Float32Array.from(f.flatMap((p) => [p.x, p.y, p.z]))),
+        close: () => t.close(),
+      };
+    },
+    occlusion() {
+      if (!segmenterCopy) return null;
+      const w = new Worker(new URL('./segment-worker.ts', import.meta.url), { type: 'module', name: 'heisenbert-faceswap-video-occlusion' });
+      const ready = new Promise<void>((resolve) => { w.onmessage = (e) => { if (e.data.type === 'ready' || e.data.type === 'error') resolve(); }; });
+      w.postMessage({ type: 'init', model: segmenterCopy.slice(0), wasm: opts.mediapipeWasm ?? MP_CDN });
+      return {
+        async mask(small, ts) {
+          await ready;
+          return new Promise<FaceMask | null>((resolve) => {
+            let mask: FaceMask | null = null;
+            w.onmessage = (e) => { if (e.data.type === 'mask') mask = e.data.mask; else if (e.data.type === 'done') resolve(mask); };
+            w.postMessage({ type: 'frame', bitmap: small, ts, reply: true }, [small]);
+          });
+        },
+        close: () => w.terminate(),
+      };
+    },
+    async still(frame, faces, mask) {
+      const m = await request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'still', id, frame, faces, mask }), [frame, ...faces.map((f) => f.points.buffer), ...(mask ? [mask.data.buffer] : [])]);
+      return m.frame as ImageBitmap;
+    },
   };
   let lastTs = 0;
   const monotonic = (ts: number) => (lastTs = Math.max(lastTs + 1, Math.round(ts)));
@@ -241,6 +290,9 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
         return faces.sort((a, b) => b.box.width - a.box.width);
       } finally { bitmap.close(); }
     },
+
+    scanVideo: async (file, o) => (await import('./video.ts')).scanVideo(videoEngine, file, o),
+    swapVideo: async (file, o) => (await import('./video.ts')).swapVideo(videoEngine, file, o),
 
     setStrength(value, ms = 400) { send({ type: 'strength', value: Math.max(0, Math.min(1, value)), ms }); },
 
