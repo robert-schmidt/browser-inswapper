@@ -36,6 +36,12 @@ export type FaceSwapOptions = {
   onLog?: (message: string) => void;
   /** Keep hands, microphones and other things in front of the face visible (default true; adds a 16 MB model). */
   occlusion?: boolean;
+  /**
+   * Where the worker files are served, if your bundler mishandles workers from packages (Next.js does: it
+   * assumes `window` exists). Copy dist/worker.js and dist/segment-worker.js to your public folder and pass
+   * their URLs. By default they load next to this file via `new URL(…, import.meta.url)`.
+   */
+  workers?: { swap?: string | URL; occlusion?: string | URL };
   /** Where face tracking runs: 'GPU' (default, faster on average) or 'CPU' (steadier timing, leaves the GPU to the swap model). */
   tracking?: 'CPU' | 'GPU';
 };
@@ -109,7 +115,11 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   let groupLandmarker: FaceLandmarker | null = null;
   // Occlusion runs in its own worker on small copies of the frame and sends masks straight to the swap worker.
   const segmenterCopy = segmenterBytes?.slice(0) ?? null; // for video files' own occlusion worker
-  const segWorker = segmenterBytes ? new Worker(new URL('./segment-worker.ts', import.meta.url), { type: 'module', name: 'heisenbert-faceswap-occlusion' }) : null;
+  // Written out in full: bundlers only recognise `new Worker(new URL('./x', import.meta.url))` as it is.
+  const occlusionWorker = (name: string) => opts.workers?.occlusion
+    ? new Worker(opts.workers.occlusion, { type: 'module', name })
+    : new Worker(new URL('./segment-worker.ts', import.meta.url), { type: 'module', name });
+  const segWorker = segmenterBytes ? occlusionWorker('heisenbert-faceswap-occlusion') : null;
   const masks = new MessageChannel();
   let segIdle = false, lastSeg = 0;
   if (segWorker) {
@@ -132,7 +142,9 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   const sizeOf = (s: CanvasImageSource | VideoFrame) =>
     'displayWidth' in s ? [s.displayWidth, s.displayHeight] : 'videoWidth' in s ? [s.videoWidth, s.videoHeight] : [Number((s as HTMLCanvasElement).width), Number((s as HTMLCanvasElement).height)];
 
-  const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module', name: 'heisenbert-faceswap' });
+  const worker = opts.workers?.swap
+    ? new Worker(opts.workers.swap, { type: 'module', name: 'heisenbert-faceswap' })
+    : new Worker(new URL('./worker.ts', import.meta.url), { type: 'module', name: 'heisenbert-faceswap' });
   const pending = new Map<number, (m: ToMain) => void>();
   let seq = 0;
   let lastStats: Stats | null = null;
@@ -198,7 +210,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     },
     occlusion() {
       if (!segmenterCopy) return null;
-      const w = new Worker(new URL('./segment-worker.ts', import.meta.url), { type: 'module', name: 'heisenbert-faceswap-video-occlusion' });
+      const w = occlusionWorker('heisenbert-faceswap-video-occlusion');
       const ready = new Promise<void>((resolve) => { w.onmessage = (e) => { if (e.data.type === 'ready' || e.data.type === 'error') resolve(); }; });
       w.postMessage({ type: 'init', model: segmenterCopy.slice(0), wasm: opts.mediapipeWasm ?? MP_CDN });
       return {

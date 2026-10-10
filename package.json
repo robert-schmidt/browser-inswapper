@@ -21,6 +21,11 @@
       "types": "./dist/react.d.ts",
       "source": "./src/react.ts",
       "default": "./dist/react.js"
+    },
+    "./issues": {
+      "types": "./dist/faces.d.ts",
+      "source": "./src/faces.ts",
+      "default": "./dist/faces.js"
     }
   },
   "files": [
@@ -31,7 +36,7 @@
     "NOTICE.md"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "rm -rf dist && tsup",
     "test": "node --test src/*.test.ts",
     "demo": "vite demo --port 5180",
     "typecheck": "tsc --noEmit",
