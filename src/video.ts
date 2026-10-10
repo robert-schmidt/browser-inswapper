@@ -21,11 +21,17 @@ export type VideoPerson = {
 
 export type VideoScan = { people: VideoPerson[]; duration: number; width: number; height: number; fps: number };
 export type VideoProgress = { progress: number; etaSeconds: number | null; frames: number };
-export type SwapVideoOptions = {
-  /** People from `scanVideo`. With `swap`, only faces recognised as those people are replaced. */
+/** Part of the clip to use, in seconds. */
+export type VideoRange = { start?: number; end?: number };
+export type SwapVideoOptions = VideoRange & {
+  /** People from `scanVideo` (needed for `map`: faces are recognised against them on every frame). */
   people?: VideoPerson[];
-  /** Ids of the people to replace. Leave out to replace every face. */
-  swap?: number[];
+  /**
+   * Who becomes whom: person id → identity embedding (from `identityOf` or `setIdentity`), or null to keep them as
+   * they are. People left out, and faces matching no one, stay as they are. Leave `map` out to give every face the
+   * current identity.
+   */
+  map?: Record<number, Float32Array | null>;
   onProgress?: (p: VideoProgress) => void;
   signal?: AbortSignal;
 };
@@ -39,8 +45,8 @@ export type VideoEngine = {
   tracker(): Promise<{ detect(frame: VideoFrame, ts: number): Float32Array[]; close(): void }>;
   /** Hand and object masks for one pass, or null when occlusion is off. Takes ownership of each small bitmap. */
   occlusion(): { mask(small: ImageBitmap, ts: number): Promise<FaceMask | null>; close(): void } | null;
-  /** The frame with each face swapped (points: pixel x/y pairs). Takes ownership of `frame`. */
-  still(frame: ImageBitmap, faces: { key: string; points: Float32Array }[], mask: FaceMask | null): Promise<ImageBitmap>;
+  /** The frame with each face swapped (points: pixel x/y pairs; identity: that face's target). Takes ownership of `frame`. */
+  still(frame: ImageBitmap, faces: { key: string; points: Float32Array; identity?: Float32Array }[], mask: FaceMask | null): Promise<ImageBitmap>;
 };
 
 const SAME_PERSON = 0.45; // ArcFace cosine between two sightings of one person (different people sit near 0–0.2)
@@ -66,18 +72,29 @@ async function open(file: Blob) {
   return { mb, input, track };
 }
 
+export type VideoInfo = { duration: number; width: number; height: number; fps: number };
+
+/** Length, size and frame rate, read from the file itself (no playback needed). */
+export async function videoInfo(file: Blob): Promise<VideoInfo> {
+  const { input, track } = await open(file);
+  try {
+    return { duration: await track.computeDuration(), width: track.displayWidth, height: track.displayHeight, fps: (await track.computePacketStats(120)).averagePacketRate };
+  } finally { input.dispose(); }
+}
+
 /** Samples frames across the clip and groups the faces it finds into people, most seen first. */
-export async function scanVideo(engine: VideoEngine, file: Blob, opts: { samples?: number; signal?: AbortSignal } = {}): Promise<VideoScan> {
+export async function scanVideo(engine: VideoEngine, file: Blob, opts: VideoRange & { samples?: number; signal?: AbortSignal } = {}): Promise<VideoScan> {
   const { mb, input, track } = await open(file);
   try {
     const duration = await track.computeDuration();
     const fps = (await track.computePacketStats(120)).averagePacketRate;
     const sink = new mb.VideoSampleSink(track);
     const samples = opts.samples ?? 12;
+    const from = Math.max(0, opts.start ?? 0), to = Math.min(duration, opts.end ?? duration);
     const people: (VideoPerson & { size: number })[] = [];
     for (let k = 0; k < samples; k++) {
       opts.signal?.throwIfAborted();
-      const sample = await sink.getSample((duration * (k + 0.5)) / samples);
+      const sample = await sink.getSample(from + ((to - from) * (k + 0.5)) / samples);
       if (!sample) continue;
       const frame = sample.toVideoFrame();
       sample.close();
@@ -107,7 +124,7 @@ export async function scanVideo(engine: VideoEngine, file: Blob, opts: { samples
 export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideoOptions = {}): Promise<Blob> {
   const { mb, input, track } = await open(file);
   const people = opts.people ?? [];
-  const only = opts.swap && people.length && opts.swap.length < people.length ? new Set(opts.swap) : null;
+  const map = opts.map ?? null;
   const tracker = await engine.tracker();
   const occlusion = engine.occlusion();
   type Track = { id: number; cx: number; cy: number; size: number; filter: VectorFilter; person: number | null; checkedAt: number };
@@ -117,6 +134,7 @@ export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideo
     const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: 'in-memory' }), target: new mb.BufferTarget() });
     const conversion = await mb.Conversion.init({
       input, output, tracks: 'primary',
+      trim: opts.start !== undefined || opts.end !== undefined ? { start: opts.start, end: opts.end } : undefined,
       video: {
         forceTranscode: true,
         allowTransformationMetadata: false, // rotate phone videos into the pixels: the tracker needs upright faces
@@ -141,8 +159,8 @@ export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideo
           }
           tracks = next.map((n) => n.t);
 
-          // Who is who, only when some people are to be left alone.
-          if (only) {
+          // Who is who, when people are mapped to different faces (or left as they are).
+          if (map) {
             const due = next.filter((n) => frames - n.t.checkedAt >= RECHECK_FRAMES);
             if (due.length) {
               const embeddings = await engine.embed(await createImageBitmap(bitmap), due.map((n) => n.lm));
@@ -153,11 +171,11 @@ export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideo
               });
             }
           }
-          const chosen = next.filter((n) => !only || (n.t.person !== null && only.has(n.t.person)));
-          const faces = chosen.map(({ t, lm }) => {
+          const target = (t: Track) => (map ? (t.person === null ? null : map[t.person] ?? null) : undefined);
+          const faces = next.filter(({ t }) => target(t) !== null).map(({ t, lm }) => {
             const raw = new Array<number>((lm.length / 3) * 2);
             for (let i = 0; i < raw.length / 2; i++) { raw[i * 2] = lm[i * 3] * w; raw[i * 2 + 1] = lm[i * 3 + 1] * h; }
-            return { key: `video-${t.id}`, points: Float32Array.from(t.filter.filter(raw, ts)) };
+            return { key: `video-${t.id}`, points: Float32Array.from(t.filter.filter(raw, ts)), identity: target(t)?.slice() };
           });
           const mask = occlusion && faces.length
             ? await occlusion.mask(await createImageBitmap(bitmap, { resizeWidth: 256, resizeHeight: Math.max(16, Math.round((256 * h) / w)), resizeQuality: 'low' }), ts)

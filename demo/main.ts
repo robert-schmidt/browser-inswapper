@@ -123,9 +123,16 @@ backendSel.onchange = async () => {
 };
 
 const faces = document.querySelector<HTMLElement>('.faces')!;
+
+// Faces that people in a video can become: the presets, plus every photo added.
+type Target = { key: string; label: string; image: string; face?: FoundFace; thumb: CanvasImageSource };
+const targets: Target[] = [...faces.querySelectorAll<HTMLButtonElement>('.face[data-face]')]
+  .filter((b) => b.dataset.face)
+  .map((b) => ({ key: b.dataset.face!, label: b.textContent!.trim(), image: b.dataset.face!, thumb: b.querySelector('img')! }));
+let identityKey: string | null = null;
 const select = (b: HTMLButtonElement) => faces.querySelectorAll('.face').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
 for (const b of faces.querySelectorAll<HTMLButtonElement>('.face')) {
-  b.onclick = () => { select(b); void choose(b.dataset.face ? { image: b.dataset.face } : null); };
+  b.onclick = () => { select(b); identityKey = b.dataset.face || null; void choose(b.dataset.face ? { image: b.dataset.face } : null); };
 }
 
 // Your own photo: find the faces, let the person pick one and see what might make it less accurate.
@@ -184,10 +191,14 @@ function showPhoto(url: string, found: FoundFace[]) {
     thumb.style.cssText = 'width:64px;height:64px;border-radius:8px';
     chip.append(thumb, 'Your photo');
     const id: Identity = { image: url, face: picked };
-    chip.onclick = () => { select(chip); void choose(id); };
+    const key = `photo-${targets.length}`;
+    targets.push({ key, label: `Your photo ${targets.filter((t) => t.key.startsWith('photo-')).length + 1}`, image: url, face: picked, thumb });
+    chip.onclick = () => { select(chip); identityKey = key; void choose(id); };
     faces.append(chip);
     select(chip);
+    identityKey = key;
     void choose(id);
+    renderMapping();
   };
   dialog.showModal();
 }
@@ -227,59 +238,139 @@ rec.onclick = () => {
   rec.textContent = 'Stop recording (0 s)';
 };
 
-// Video files: find the people, choose who to replace, swap every frame, preview and download.
-let video: { file: File; scan: VideoScan; pick: Set<number> } | null = null;
+// Video files: pick up to 60 s, find the people in it, choose who each becomes, swap every frame, download.
+const MAX_SECONDS = 60;
+let video: { file: File; duration: number; scan: VideoScan | null; range: [number, number] } | null = null;
+const mapping = new Map<number, string>(); // person id → target key ('' = keep as is)
+const identities = new Map<string, Float32Array>(); // target key → identity, computed once
 let videoAbort: AbortController | null = null;
 const vStatus = $('videoStatus'), vProgress = $<HTMLProgressElement>('videoProgress'), vGo = $<HTMLButtonElement>('videoGo');
-const vPeople = $('videoPeople'), vResult = $<HTMLVideoElement>('videoResult'), vDownload = $<HTMLAnchorElement>('videoDownload');
-const fmtTime = (s: number) => (s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`);
+const vResult = $<HTMLVideoElement>('videoResult'), vDownload = $<HTMLAnchorElement>('videoDownload'), vSource = $<HTMLVideoElement>('videoSource');
+const tStart = $<HTMLInputElement>('trimStart'), tEnd = $<HTMLInputElement>('trimEnd');
+const fmtTime = (s: number) => { const m = Math.floor(Math.round(s) / 60), r = Math.round(s) % 60; return m ? `${m} min${r ? ` ${r} s` : ''}` : `${r} s`; };
+const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
 $<HTMLInputElement>('videoFile').onchange = async (e) => {
   const el = e.target as HTMLInputElement, file = el.files?.[0];
   el.value = '';
   if (!file) return;
-  video = null; vGo.disabled = true; vPeople.replaceChildren(); $('videoPeopleRow').hidden = true;
-  vResult.hidden = true; vDownload.hidden = true;
+  if (vSource.src) URL.revokeObjectURL(vSource.src);
+  vSource.src = URL.createObjectURL(file);
+  vResult.hidden = true; vDownload.hidden = true; $('mapping').hidden = true; vGo.disabled = true;
   const engine = await ensureEngine();
   if (!engine) return;
-  vStatus.textContent = 'Looking for people in the video…';
-  try {
-    const scan = await engine.scanVideo(file);
-    $('videoInfo').textContent = `${file.name}: ${scan.width}×${scan.height}, ${fmtTime(scan.duration)}, ${Math.round(scan.fps)} fps`;
-    if (!scan.people.length) { vStatus.textContent = 'No faces found in this video.'; return; }
-    video = { file, scan, pick: new Set(scan.people.map((p) => p.id)) };
-    for (const p of scan.people) {
-      const chip = Object.assign(document.createElement('button'), { className: 'face' });
-      const c = document.createElement('canvas');
-      c.width = c.height = 64; c.style.cssText = 'width:64px;height:64px;border-radius:8px';
-      c.getContext('2d')!.drawImage(p.preview, 0, 0, 64, 64);
-      chip.append(c, `Person ${p.id + 1}`);
-      chip.setAttribute('aria-pressed', 'true');
-      chip.onclick = () => {
-        const on = !video!.pick.has(p.id);
-        if (on) video!.pick.add(p.id); else video!.pick.delete(p.id);
-        chip.setAttribute('aria-pressed', String(on));
-        vGo.disabled = !video!.pick.size;
-      };
-      vPeople.append(chip);
-    }
-    $('videoPeopleRow').hidden = false;
-    vGo.disabled = false;
-    vStatus.textContent = `${scan.people.length === 1 ? 'One person' : `${scan.people.length} people`} found. Tap a face to leave them as they are.`;
-  } catch (err) { vStatus.textContent = (err as Error).message; }
+  let info;
+  try { info = await engine.videoInfo(file); } catch (err) { vStatus.textContent = (err as Error).message; $('trimmer').hidden = true; return; }
+  const duration = info.duration;
+  video = { file, duration, scan: null, range: [0, Math.min(duration, MAX_SECONDS)] };
+  $('videoInfo').textContent = `${file.name}: ${info.width}×${info.height}, ${fmtTime(duration)}, ${Math.round(info.fps)} fps`;
+  for (const t of [tStart, tEnd]) t.max = String(duration);
+  tStart.value = '0'; tEnd.value = String(video.range[1]);
+  $('trimmer').hidden = false;
+  showRange();
+  vStatus.textContent = duration > MAX_SECONDS
+    ? `Videos can be up to ${MAX_SECONDS} seconds: choose the part to use, then find the people in it.`
+    : '';
+  if (duration <= MAX_SECONDS) await findPeople(); // short enough: no trimming needed to start
 };
 
+// Start and end handles: at most 60 s apart, at least 1 s; dragging one pushes the other.
+function onTrim(moved: 'start' | 'end') {
+  if (!video) return;
+  let s = Number(tStart.value), e = Number(tEnd.value);
+  if (moved === 'start') { if (e - s > MAX_SECONDS) e = s + MAX_SECONDS; if (e - s < 1) e = Math.min(video.duration, s + 1); if (e - s < 1) s = e - 1; }
+  else { if (e - s > MAX_SECONDS) s = e - MAX_SECONDS; if (e - s < 1) s = Math.max(0, e - 1); if (e - s < 1) e = s + 1; }
+  tStart.value = String(s); tEnd.value = String(e);
+  video.range = [s, e];
+  vSource.pause(); vSource.currentTime = moved === 'start' ? s : e;
+  showRange();
+  if (video.scan) { video.scan = null; $('mapping').hidden = true; vGo.disabled = true; vStatus.textContent = 'The selection changed: find the people in it again.'; }
+}
+tStart.oninput = () => onTrim('start');
+tEnd.oninput = () => onTrim('end');
+function showRange() {
+  const [s, e] = video!.range;
+  $('trimStartOut').textContent = clock(s); $('trimEndOut').textContent = clock(e);
+  $('trimInfo').textContent = `Selected ${clock(s)} to ${clock(e)} (${fmtTime(e - s)} of ${fmtTime(video!.duration)})`;
+}
+$('trimPlay').onclick = () => {
+  if (!video) return;
+  const [s, e] = video.range;
+  vSource.currentTime = s; void vSource.play();
+  vSource.ontimeupdate = () => { if (vSource.currentTime >= e) { vSource.pause(); vSource.ontimeupdate = null; } };
+};
+$('findPeople').onclick = () => void findPeople();
+
+async function findPeople() {
+  if (!video) return;
+  const engine = await ensureEngine();
+  if (!engine) return;
+  const [start, end] = video.range;
+  $('mapping').hidden = true; vGo.disabled = true;
+  vStatus.textContent = 'Looking for people in this part…';
+  try {
+    const scan = await engine.scanVideo(video.file, { start, end });
+    if (!video || video.range[0] !== start || video.range[1] !== end) return; // the selection moved meanwhile
+    video.scan = scan;
+    mapping.clear();
+    if (!scan.people.length) { vStatus.textContent = 'No faces found in this part.'; return; }
+    for (const p of scan.people) mapping.set(p.id, identityKey ?? targets[0]?.key ?? '');
+    renderMapping();
+    $('mapping').hidden = false;
+    vStatus.textContent = `${scan.people.length === 1 ? 'One person' : `${scan.people.length} people`} found.`;
+  } catch (err) { vStatus.textContent = (err as Error).message; }
+}
+
+/** One row per person: their face, then a menu of who they become. */
+function renderMapping() {
+  const people = video?.scan?.people ?? [];
+  $('mapList').replaceChildren(...people.map((p) => {
+    const li = document.createElement('li');
+    const face = document.createElement('canvas');
+    face.width = face.height = 112;
+    face.getContext('2d')!.drawImage(p.preview, 0, 0, 112, 112);
+    const target = document.createElement('canvas');
+    target.width = target.height = 112;
+    const sel = document.createElement('select');
+    sel.setAttribute('aria-label', `Person ${p.id + 1} becomes`);
+    sel.append(new Option('Keep as is', ''), ...targets.map((t) => new Option(t.label, t.key)));
+    sel.value = mapping.get(p.id) ?? '';
+    const draw = () => {
+      const ctx = target.getContext('2d')!;
+      ctx.clearRect(0, 0, 112, 112);
+      const t = targets.find((x) => x.key === sel.value);
+      if (t) ctx.drawImage(t.thumb, 0, 0, 112, 112);
+      target.style.visibility = t ? 'visible' : 'hidden';
+    };
+    sel.onchange = () => { mapping.set(p.id, sel.value); draw(); updateGo(); };
+    draw();
+    const arrow = Object.assign(document.createElement('span'), { className: 'arrow', textContent: 'becomes' });
+    li.append(face, `Person ${p.id + 1}`, arrow, sel, target);
+    return li;
+  }));
+  updateGo();
+}
+function updateGo() { vGo.disabled = !video?.scan || ![...mapping.values()].some(Boolean); }
+
 vGo.onclick = async () => {
-  if (!video || !swap) return;
-  if (!identity) { vStatus.textContent = 'Choose a face to swap to first (above), or add your own photo.'; return; }
+  if (!video?.scan || !swap) return;
   videoAbort = new AbortController();
   vGo.disabled = true; $('videoCancel').hidden = false; vProgress.hidden = false; vProgress.value = 0;
   vResult.hidden = true; vDownload.hidden = true;
-  vStatus.textContent = 'Starting…';
+  vStatus.textContent = 'Preparing the faces…';
   try {
+    const map: Record<number, Float32Array | null> = {};
+    for (const [person, key] of mapping) {
+      const t = targets.find((x) => x.key === key);
+      if (!t) { map[person] = null; continue; }
+      if (!identities.has(key)) identities.set(key, await swap.identityOf({ image: t.image, face: t.face }));
+      map[person] = identities.get(key)!;
+    }
+    const [start, end] = video.range;
     const blob = await swap.swapVideo(video.file, {
+      start, end,
       people: video.scan.people,
-      swap: [...video.pick],
+      map,
       signal: videoAbort.signal,
       onProgress: ({ progress: p, etaSeconds }) => {
         vProgress.value = p;
@@ -297,7 +388,7 @@ vGo.onclick = async () => {
   } catch (err) {
     vStatus.textContent = videoAbort.signal.aborted ? 'Canceled.' : `Couldn’t finish: ${(err as Error).message}`;
   } finally {
-    vGo.disabled = false; $('videoCancel').hidden = true; vProgress.hidden = true; videoAbort = null;
+    updateGo(); $('videoCancel').hidden = true; vProgress.hidden = true; videoAbort = null;
   }
 };
 $('videoCancel').onclick = () => videoAbort?.abort();

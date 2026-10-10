@@ -14,14 +14,14 @@ import { buildMesh } from './mesh.ts';
 import { FACE_OVAL, keyPoints, similarity, template, toCanvas } from './geometry.ts';
 import { faceIssues, type FaceIssue } from './faces.ts';
 import type { FaceMask } from './protocol.ts';
-import type { SwapVideoOptions, VideoEngine, VideoScan } from './video.ts';
+import type { SwapVideoOptions, VideoEngine, VideoInfo, VideoRange, VideoScan } from './video.ts';
 
 export type { Backend, Capabilities } from './backend.ts';
 export type { ModelSet, ModelSpec, Progress } from './models.ts';
 export { KNOWN_SHA256, clearModelCache } from './models.ts';
 export { probe } from './backend.ts';
 export { ISSUE_TEXT, type FaceIssue } from './faces.ts';
-export type { SwapVideoOptions, VideoPerson, VideoProgress, VideoScan } from './video.ts';
+export type { SwapVideoOptions, VideoInfo, VideoPerson, VideoProgress, VideoRange, VideoScan } from './video.ts';
 
 export type FaceSwapOptions = {
   models: ModelSet;
@@ -64,7 +64,11 @@ export type FaceSwap = {
   /** Every face in a photo, biggest first, with quality notes and a preview: pass one to setIdentity({ image, face }). */
   findFaces(image: ImageBitmapSource | string): Promise<FoundFace[]>;
   /** Video files: the people in a clip (sampled across it), most seen first, to choose who to replace. */
-  scanVideo(file: Blob, opts?: { samples?: number; signal?: AbortSignal }): Promise<VideoScan>;
+  /** Video files: length, size and frame rate, read from the file (works for files the browser can't play). */
+  videoInfo(file: Blob): Promise<VideoInfo>;
+  scanVideo(file: Blob, opts?: VideoRange & { samples?: number; signal?: AbortSignal }): Promise<VideoScan>;
+  /** A face's identity (512 numbers) without switching to it: for `swapVideo`'s `map`, or to store. */
+  identityOf(source: { image: ImageBitmapSource | string; face?: FoundFace }): Promise<Float32Array>;
   /** Video files: an MP4 with faces swapped to the current identity on every frame (audio kept). Slower than real time. */
   swapVideo(file: Blob, opts?: SwapVideoOptions): Promise<Blob>;
   /** Fade the swap in (1) or out (0) without losing the identity. */
@@ -210,7 +214,8 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
       };
     },
     async still(frame, faces, mask) {
-      const m = await request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'still', id, frame, faces, mask }), [frame, ...faces.map((f) => f.points.buffer), ...(mask ? [mask.data.buffer] : [])]);
+      const m = await request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'still', id, frame, faces, mask }),
+        [frame, ...faces.flatMap((f) => (f.identity ? [f.points.buffer, f.identity.buffer] : [f.points.buffer])), ...(mask ? [mask.data.buffer] : [])]);
       return m.frame as ImageBitmap;
     },
   };
@@ -291,6 +296,16 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
       } finally { bitmap.close(); }
     },
 
+    async identityOf(source) {
+      const bitmap = await toBitmap(source.image);
+      imageLandmarker ??= await makeLandmarker('IMAGE');
+      const lm = source.face?.landmarks.slice() ?? landmarksOf(imageLandmarker.detect(bitmap));
+      if (!lm) { bitmap.close(); throw new Error('No face found in that picture.'); }
+      const [e] = await videoEngine.embed(bitmap, [lm]);
+      return e;
+    },
+
+    videoInfo: async (file) => (await import('./video.ts')).videoInfo(file),
     scanVideo: async (file, o) => (await import('./video.ts')).scanVideo(videoEngine, file, o),
     swapVideo: async (file, o) => (await import('./video.ts')).swapVideo(videoEngine, file, o),
 
