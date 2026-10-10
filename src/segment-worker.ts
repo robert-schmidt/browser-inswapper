@@ -11,7 +11,11 @@ type In =
 
 let segmenter: ImageSegmenter | null = null;
 let port: MessagePort;
-const FACE_SKIN = 3; // selfie_multiclass_256x256: background, hair, body skin, face skin, clothes, other
+// selfie_multiclass_256x256 classes: 0 background, 1 hair, 2 body skin, 3 face skin, 4 clothes, 5 other.
+// The mask says where the swapped face may show: everywhere except what can be in front of a face (hands are
+// body skin; mics and cups are "other"). Not "face skin only": eyes and lips aren't face skin, and the real
+// ones would show through.
+const IN_FRONT = [2, 4, 5];
 
 self.onmessage = async (e: MessageEvent<In>) => {
   const m = e.data;
@@ -32,10 +36,11 @@ self.onmessage = async (e: MessageEvent<In>) => {
     if (!segmenter) return;
     const r = segmenter.segmentForVideo(m.bitmap, m.ts);
     try {
-      const conf = r.confidenceMasks?.[FACE_SKIN]?.getAsFloat32Array();
-      if (conf) {
-        const mask: FaceMask = { data: new Uint8Array(conf.length), width: m.bitmap.width, height: m.bitmap.height };
-        for (let i = 0; i < conf.length; i++) mask.data[i] = conf[i] * 255;
+      const masks = IN_FRONT.map((c) => r.confidenceMasks?.[c]?.getAsFloat32Array());
+      if (masks.every(Boolean)) {
+        const n = masks[0]!.length;
+        const mask: FaceMask = { data: new Uint8Array(n), width: m.bitmap.width, height: m.bitmap.height };
+        for (let i = 0; i < n; i++) mask.data[i] = Math.max(0, 1 - masks[0]![i] - masks[1]![i] - masks[2]![i]) * 255;
         port.postMessage(mask, [mask.data.buffer]);
       }
     } finally { r.close(); }

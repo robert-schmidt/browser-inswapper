@@ -33,9 +33,12 @@ export type FaceSwapOptions = {
   onLog?: (message: string) => void;
   /** Keep hands, microphones and other things in front of the face visible (default true; adds a 16 MB model). */
   occlusion?: boolean;
+  /** Where face tracking runs: 'GPU' (default, faster on average) or 'CPU' (steadier timing, leaves the GPU to the swap model). */
+  tracking?: 'CPU' | 'GPU';
 };
 
-export type Stats = { fps: number; inferMs: number; backend: Backend };
+/** `latencyMs`: from a camera frame arriving to its swapped copy leaving (tracking + compositing), averaged. */
+export type Stats = { fps: number; inferMs: number; backend: Backend; latencyMs: number };
 export type IdentitySource = { embedding: Float32Array } | { image: ImageBitmapSource | string; face?: FoundFace };
 
 /** A face found in a photo by `findFaces`. */
@@ -86,11 +89,11 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   ]);
 
   const vision = await FilesetResolver.forVisionTasks(opts.mediapipeWasm ?? MP_CDN);
-  const makeLandmarker = (mode: 'VIDEO' | 'IMAGE', numFaces = 1) => FaceLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetBuffer: new Uint8Array(landmarkerBytes), delegate: 'GPU' },
+  const makeLandmarker = (mode: 'VIDEO' | 'IMAGE', numFaces = 1, delegate: 'CPU' | 'GPU' = 'GPU') => FaceLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetBuffer: new Uint8Array(landmarkerBytes), delegate },
     runningMode: mode, numFaces, minFaceDetectionConfidence: 0.5, minTrackingConfidence: 0.5,
   }).catch(() => FaceLandmarker.createFromOptions(vision, { baseOptions: { modelAssetBuffer: new Uint8Array(landmarkerBytes), delegate: 'CPU' }, runningMode: mode, numFaces }));
-  const landmarker = await makeLandmarker('VIDEO');
+  const landmarker = await makeLandmarker('VIDEO', 1, opts.tracking ?? 'GPU');
   let imageLandmarker: FaceLandmarker | null = null;
   let groupLandmarker: FaceLandmarker | null = null;
   // Occlusion runs in its own worker on small copies of the frame and sends masks straight to the swap worker.
@@ -121,6 +124,8 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   const pending = new Map<number, (m: ToMain) => void>();
   let seq = 0;
   let lastStats: Stats | null = null;
+  let latency = 0;
+  const measured = (t0: number) => { const ms = performance.now() - t0; latency = latency ? latency * 0.9 + ms * 0.1 : ms; };
   const send = (m: ToWorker, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
   const request = <T extends ToMain>(build: (id: number) => ToWorker, transfer: Transferable[] = []) =>
     new Promise<T>((resolve, reject) => {
@@ -133,7 +138,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     worker.onmessage = (e: MessageEvent<ToMain>) => {
       const m = e.data;
       if (m.type === 'ready') resolve(m);
-      else if (m.type === 'stats') { lastStats = m; opts.onStats?.(m); }
+      else if (m.type === 'stats') { lastStats = { ...m, latencyMs: Math.round(latency) }; opts.onStats?.(lastStats); }
       else if (m.type === 'log') opts.onLog?.(m.message);
       else if (m.type === 'error' && m.id === undefined) reject(new Error(m.message));
       if ('id' in m && m.id !== undefined) { pending.get(m.id)?.(m); pending.delete(m.id); }
@@ -287,6 +292,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
         if (done || !frame) break;
         if (inFlight) { frame.close(); continue; }
         inFlight = true;
+        const t0 = performance.now();
         const ts = monotonic(frame.timestamp / 1000);
         let lm: Float32Array | null = null;
         try {
@@ -295,7 +301,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
         } catch { /* keep the frame unswapped */ }
         request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'frame', id, frame, landmarks: lm, ts }), [frame])
           // Don't wait on write(): it can stay pending while the sink is idle, which would stall the loop.
-          .then((m) => { writer.write(m.frame as VideoFrame).catch(() => (m.frame as VideoFrame).close()); })
+          .then((m) => { measured(t0); writer.write(m.frame as VideoFrame).catch(() => (m.frame as VideoFrame).close()); })
           .catch((err) => opts.onLog?.(`frame dropped: ${err.message}`))
           .finally(() => { inFlight = false; });
       }
@@ -321,7 +327,9 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
         inFlight = true;
         try {
           if (canvas.width !== video.videoWidth) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; }
+          const t0 = performance.now();
           ctx.transferFromImageBitmap(await api.processFrame(video));
+          measured(t0);
         } catch (err) { opts.onLog?.(`frame dropped: ${(err as Error).message}`); }
         inFlight = false;
       }

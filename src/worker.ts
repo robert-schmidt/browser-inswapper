@@ -16,7 +16,10 @@ const SIZE = 128;
 const BUDGET_MS = 150; // a backend slower than this per swap is skipped for the next one on the list
 const COLOR_MATCH = 0.3; // pull the swapped face's mean colour this far towards the original light (1 = fully: loses skin tone)
 
-let swapper: ort.InferenceSession | null = null;
+// The swap model behind one call. (ponytail: WebGPU graph capture measured within 2% of a plain run on an M2 Max,
+// so it isn't used; worth re-measuring on discrete GPUs.)
+type Runner = { run(target: Float32Array, source: Float32Array): Promise<Float32Array>; release(): Promise<void> };
+let swapper: Runner | null = null;
 let arcface: ort.InferenceSession | null = null;
 let arcfaceBytes: ArrayBuffer | null = null;
 let backend: Backend = 'wasm';
@@ -32,6 +35,7 @@ let strengthFrom = 0, strengthTo = 0, strengthStart = 0, strengthMs = 0;
 // Light smoothing on every landmark (pixels): steadies the still face without the lag that makes it slide.
 const smooth = new VectorFilter(3.0, 0.02);
 let busy = false;
+let colorShift: number[] | null = null;
 let compositor: Compositor;
 let latestMask: FaceMask | null = null; // from the occlusion worker, a frame or two behind
 const face = new OffscreenCanvas(SIZE, SIZE);
@@ -66,21 +70,27 @@ function currentLatent() {
 }
 const currentStrength = () => strengthFrom + (strengthTo - strengthFrom) * ease(progress(strengthStart, strengthMs));
 
+async function plainRunner(bytes: ArrayBuffer, b: Backend): Promise<Runner> {
+  const s = await ort.InferenceSession.create(new Uint8Array(bytes), sessionOptions(b, caps));
+  return {
+    run: async (target, source) => (await s.run({ target: new ort.Tensor('float32', target, [1, 3, SIZE, SIZE]), source: new ort.Tensor('float32', source, [1, 512]) })).output.data as Float32Array,
+    release: () => s.release(),
+  };
+}
+
 async function createSwapper(bytes: ArrayBuffer, order: Backend[]) {
-  let best: { s: ort.InferenceSession; b: Backend; ms: number } | null = null;
+  let best: { s: Runner; b: Backend; ms: number } | null = null;
+  const target = new Float32Array(3 * SIZE * SIZE).fill(0.5), source = new Float32Array(512).fill(0.04);
   for (const b of order) {
     if (b === 'wasm' && best) break; // a working GPU always beats the CPU for this model
     try {
       let t = performance.now();
-      const s = await ort.InferenceSession.create(new Uint8Array(bytes), sessionOptions(b, caps));
-      post({ type: 'log', message: `${b}: session ready in ${Math.round(performance.now() - t)} ms` });
-      const feeds = { target: new ort.Tensor('float32', new Float32Array(3 * SIZE * SIZE).fill(0.5), [1, 3, SIZE, SIZE]), source: new ort.Tensor('float32', new Float32Array(512).fill(0.04), [1, 512]) };
+      const s = await plainRunner(bytes, b);
+      await s.run(target, source); // first run compiles shaders
+      post({ type: 'log', message: `${b}: ready in ${Math.round(performance.now() - t)} ms` });
       t = performance.now();
-      await s.run(feeds); // warm-up (compiles shaders)
-      post({ type: 'log', message: `${b}: first run ${Math.round(performance.now() - t)} ms` });
-      const t0 = performance.now();
-      for (let i = 0; i < 3; i++) await s.run(feeds);
-      const ms = (performance.now() - t0) / 3;
+      for (let i = 0; i < 5; i++) await s.run(target, source);
+      const ms = (performance.now() - t) / 5;
       post({ type: 'log', message: `${b}: ${ms.toFixed(1)} ms per swap` });
       if (!best || ms < best.ms) { await best?.s.release(); best = { s, b, ms }; } else await s.release();
       if (ms <= BUDGET_MS) break;
@@ -114,13 +124,17 @@ function snapshot(r: Region, source: CanvasImageSource, points: Float32Array) {
 }
 
 function toTensor(img: ImageData, mean: number, std: number) {
+  return new ort.Tensor('float32', toFloats(img, mean, std), [1, 3, img.height, img.width]);
+}
+
+function toFloats(img: ImageData, mean: number, std: number) {
   const n = img.width * img.height, d = img.data, t = new Float32Array(3 * n);
   for (let i = 0; i < n; i++) {
     t[i] = (d[i * 4] - mean) / std;
     t[n + i] = (d[i * 4 + 1] - mean) / std;
     t[2 * n + i] = (d[i * 4 + 2] - mean) / std;
   }
-  return new ort.Tensor('float32', t, [1, 3, img.height, img.width]);
+  return t;
 }
 
 /** Soft mask in crop space: the face oval (from the landmarks) feathered, inside a feathered square. */
@@ -146,8 +160,7 @@ function faceMask(ovalCrop: [number, number][]) {
 /** Runs the swap on the current crop, colour-matches it to the original and stores it as the next patch. */
 async function swapCrop(original: ImageData, mask: Uint8ClampedArray, latent: Float32Array, uv: Float32Array) {
   const t0 = performance.now();
-  const result = await exclusive(() => swapper!.run({ target: toTensor(original, 0, 255), source: new ort.Tensor('float32', latent, [1, 512]) }));
-  const o = result.output.data as Float32Array;
+  const o = await exclusive(() => swapper!.run(toFloats(original, 0, 255), latent));
   const n = SIZE * SIZE, src = original.data;
   // Colour match inside the mask: shift the swapped face's mean towards the original skin and light.
   const mo = [0, 0, 0], ms = [0, 0, 0];
@@ -158,7 +171,9 @@ async function swapCrop(original: ImageData, mask: Uint8ClampedArray, latent: Fl
     w++;
     for (let c = 0; c < 3; c++) { mo[c] += src[i * 4 + c]; ms[c] += o[c * n + i] * 255; }
   }
-  const shift = w ? [0, 1, 2].map((c) => ((mo[c] - ms[c]) / w) * COLOR_MATCH) : [0, 0, 0];
+  const raw = w ? [0, 1, 2].map((c) => ((mo[c] - ms[c]) / w) * COLOR_MATCH) : [0, 0, 0];
+  // Smoothed over swaps, so the light on the face doesn't flicker from one result to the next.
+  const shift = colorShift = colorShift ? colorShift.map((v, c) => v + (raw[c] - v) * 0.4) : raw;
   const img = new ImageData(SIZE, SIZE);
   const px = img.data;
   for (let i = 0; i < n; i++) {
