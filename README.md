@@ -22,7 +22,8 @@ Use your camera or the sample clip, swap faces, morph between them, and record a
 - **Stays smooth when the model is slower than the camera.** The swap model runs as often as the device allows,
   for example about 10 times a second on an Apple M-series GPU. In between, the latest swapped face is drawn on a
   478-point face mesh that follows the current frame, so head turns, the mouth, eyes and brows move at the
-  camera's full frame rate.
+  camera's full frame rate. Each new result crossfades in over 70 ms, and its colour correction is smoothed
+  over time, so there's no shimmer.
 - **Keeps hands in front.** A segmentation model finds face skin, so a hand, microphone or cup in front of the
   face stays in front instead of being painted over. It runs in its own worker and never holds up the video.
 - **Checks photos.** `findFaces` finds every face in a photo, including small faces in group or full-body
@@ -93,6 +94,35 @@ The library only runs in the browser. In server-rendered frameworks, use it in c
 
 `swap.processFrame(source)` takes a video element, canvas, `ImageBitmap` or `VideoFrame` and resolves to the
 swapped `ImageBitmap`.
+
+## Performance
+
+Each swap is about 349 billion operations (the model's 128×128 face generator). Output video always keeps
+the camera's frame rate; the faster the GPU, the more often the face itself is freshly redrawn.
+
+| Device | Runs on | Per swap | Fresh faces per second | |
+| --- | --- | --- | --- | --- |
+| MacBook Pro, M2 Max (38-core GPU) | WebGPU (Metal) | 95 ms | ~10 | measured |
+| M1 / M2 (8–10-core GPU) | WebGPU (Metal) | 400–550 ms | 2–3 | estimate |
+| M4 Pro (20-core GPU) | WebGPU (Metal) | 110–150 ms | 7–9 | estimate |
+| M3 Max / M4 Max (40-core GPU) | WebGPU (Metal) | 60–80 ms | 13–16 | estimate |
+| RTX 3060 | WebGPU (D3D12 / Vulkan) | 90–140 ms | 7–11 | estimate |
+| RTX 3090 | WebGPU (D3D12 / Vulkan) | 35–50 ms | 20–28 | estimate |
+| RTX 4070 | WebGPU (D3D12 / Vulkan) | 40–60 ms | 17–25 | estimate |
+| RTX 4090 | WebGPU (D3D12 / Vulkan) | 15–25 ms | 30 (every frame) | estimate |
+| RTX 5090 | WebGPU (D3D12 / Vulkan) | 12–20 ms | 30 (every frame) | estimate |
+| Intel / AMD integrated graphics | WebGPU | 600–1,000 ms | ~1 | estimate |
+| Any computer without WebGPU | WebAssembly (CPU) | 5–15 s | not usable live | measured on M2 Max |
+
+Estimates scale the M2 Max measurement by each GPU's FP32 throughput, assuming WebGPU reaches 20–35% of peak
+on this model (the M2 Max reaches about 27%). Treat them as a range, and check your own device with the demo:
+it shows fps, swaps per second and latency.
+
+Other numbers from the M2 Max:
+- **Latency:** 35–40 ms from a camera frame arriving to its swapped copy leaving (tracking and compositing;
+  the face shown is at most one swap older).
+- **Output:** 27–30 fps with occlusion on.
+- **Startup:** the first start downloads about 300 MB; later starts load from the browser cache in 1–2 s.
 
 ## Browser support
 

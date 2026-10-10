@@ -23,7 +23,8 @@ let swap: FaceSwap | null = null;
 let input: MediaStreamTrack | null = null;
 let swapped: MediaStreamTrack | null = null;
 let identity: Identity = null;
-let stats = { fps: 0, inferMs: 0, backend: '' };
+let stats = { fps: 0, inferMs: 0, backend: '', latencyMs: 0 };
+const logs: string[] = [];
 
 // Only offer what this browser can run.
 void probe().then((caps) => {
@@ -51,8 +52,8 @@ async function start(track: MediaStreamTrack) {
       models,
       backend: backendSel.value as Backend | 'auto',
       onProgress: (p) => { progress.max = p.total || 1; progress.value = p.loaded; status.textContent = `Loading ${p.model}… ${Math.round(p.loaded / 1e6)} MB`; },
-      onStats: (s) => { stats = s; status.textContent = `${s.backend.toUpperCase()}: ${Math.round(s.fps)} fps, ${Math.round(s.inferMs)} ms per swap`; },
-      onLog: (m) => console.info('[faceswap]', m),
+      onStats: (s) => { stats = s; status.textContent = `${s.backend.toUpperCase()}: ${Math.round(s.fps)} fps, ${Math.round(1000 / Math.max(s.inferMs, 1))} swaps/s (${Math.round(s.inferMs)} ms), ${s.latencyMs} ms latency`; },
+      onLog: (m) => { logs.push(m); console.info('[faceswap]', m); },
     });
   } catch (err) {
     status.textContent = 'Couldn’t start';
@@ -205,4 +206,4 @@ rec.onclick = () => {
 };
 
 // For automated checks.
-Object.assign(window, { faceswapDemo: { get swap() { return swap; }, get stats() { return stats; }, output, choose, start, sampleTrack, createFaceSwap, models, showPhoto } });
+Object.assign(window, { faceswapDemo: { get swap() { return swap; }, get stats() { return stats; }, logs, output, choose, start, sampleTrack, createFaceSwap, models, showPhoto } });

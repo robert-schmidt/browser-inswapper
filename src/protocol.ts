@@ -9,7 +9,7 @@ export type ToWorker =
   | { type: 'strength'; value: number; ms: number }
   | { type: 'frame'; id: number; frame: VideoFrame | ImageBitmap; landmarks: Float32Array | null; ts: number };
 
-/** How likely each pixel is to be face skin (0–255), at low resolution, covering the whole frame. */
+/** Where the swapped face may show (0–255: 0 where a hand or object is in front), low resolution, whole frame. */
 export type FaceMask = { data: Uint8Array; width: number; height: number };
 
 export type ToMain =

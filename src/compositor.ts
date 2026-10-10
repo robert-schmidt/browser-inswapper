@@ -37,15 +37,15 @@ precision highp float;
 in vec2 uv;
 in float w;
 uniform sampler2D face;
-uniform sampler2D skin;   // face-skin confidence over the whole frame (white when occlusion is off)
+uniform sampler2D skin;   // 0 where something is in front of the face, over the whole frame (white when occlusion is off)
 uniform vec2 size;
 uniform float strength;
 out vec4 color;
 void main() {
   // Fade near the crop's border too, where the model has no face to draw.
   vec2 e = smoothstep(0.0, 0.06, uv) * smoothstep(0.0, 0.06, 1.0 - uv);
-  // Whatever isn't face skin (a hand, a mic) stays in front.
-  float s = smoothstep(0.2, 0.6, texture(skin, vec2(gl_FragCoord.x / size.x, 1.0 - gl_FragCoord.y / size.y)).r);
+  // A hand or mic in front of the face stays in front.
+  float s = smoothstep(0.3, 0.7, texture(skin, vec2(gl_FragCoord.x / size.x, 1.0 - gl_FragCoord.y / size.y)).r);
   color = vec4(texture(face, uv).rgb, w * e.x * e.y * s * strength);
 }`;
 
@@ -73,19 +73,24 @@ function texture(gl: WebGL2RenderingContext) {
   return t;
 }
 
+// A new swap result fades in over this long instead of replacing the last one at once: at ~10 results a
+// second, hard cuts read as shimmer around the eyes and mouth.
+const CROSSFADE_MS = 70;
+
+type Slot = { tex: WebGLTexture; texBuf: WebGLBuffer; vao: WebGLVertexArrayObject; since: number };
+
 export class Compositor {
   readonly canvas: OffscreenCanvas;
   private gl: WebGL2RenderingContext;
   private frameProg: WebGLProgram;
   private faceProg: WebGLProgram;
   private frameTex: WebGLTexture;
-  private faceTex: WebGLTexture;
   private skinTex: WebGLTexture;
-  private vao: WebGLVertexArrayObject;
   private posBuf: WebGLBuffer;
-  private texBuf: WebGLBuffer;
+  private slots: Slot[];
+  private current = -1; // newest slot; the other one is the result fading out
+  private hasPrevious = false;
   private count: number;
-  private hasFace = false;
 
   constructor(mesh: Mesh) {
     this.canvas = new OffscreenCanvas(2, 2);
@@ -95,42 +100,54 @@ export class Compositor {
     this.frameProg = program(gl, FRAME_VS, FRAME_FS);
     this.faceProg = program(gl, FACE_VS, FACE_FS);
     this.frameTex = texture(gl);
-    this.faceTex = texture(gl);
     this.skinTex = texture(gl);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     this.setSkin(null);
-    this.vao = gl.createVertexArray()!;
-    gl.bindVertexArray(this.vao);
-    const attr = (name: string, size: number, data: Float32Array, usage: number) => {
+    const n = mesh.weights.length;
+    const buffer = (data: Float32Array | Uint16Array, target: number, usage: number) => {
       const b = gl.createBuffer()!;
-      gl.bindBuffer(gl.ARRAY_BUFFER, b);
-      gl.bufferData(gl.ARRAY_BUFFER, data, usage);
-      const loc = gl.getAttribLocation(this.faceProg, name);
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(target, b);
+      gl.bufferData(target, data, usage);
       return b;
     };
-    const n = mesh.weights.length;
-    this.posBuf = attr('pos', 2, new Float32Array(n * 2), gl.DYNAMIC_DRAW);
-    this.texBuf = attr('tex', 2, new Float32Array(n * 2), gl.DYNAMIC_DRAW);
-    attr('weight', 1, mesh.weights, gl.STATIC_DRAW);
-    const ib = gl.createBuffer()!;
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.triangles, gl.STATIC_DRAW);
+    this.posBuf = buffer(new Float32Array(n * 2), gl.ARRAY_BUFFER, gl.DYNAMIC_DRAW);
+    const weightBuf = buffer(mesh.weights, gl.ARRAY_BUFFER, gl.STATIC_DRAW);
+    const indexBuf = buffer(mesh.triangles, gl.ELEMENT_ARRAY_BUFFER, gl.STATIC_DRAW);
+    const bind = (name: string, b: WebGLBuffer, size: number) => {
+      const loc = gl.getAttribLocation(this.faceProg, name);
+      gl.bindBuffer(gl.ARRAY_BUFFER, b);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    };
+    // Two slots (shared mesh positions, own texture and texture coordinates), for the crossfade.
+    this.slots = [0, 1].map(() => {
+      const texBuf = buffer(new Float32Array(n * 2), gl.ARRAY_BUFFER, gl.DYNAMIC_DRAW);
+      const vao = gl.createVertexArray()!;
+      gl.bindVertexArray(vao);
+      bind('pos', this.posBuf, 2);
+      bind('tex', texBuf, 2);
+      bind('weight', weightBuf, 1);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuf);
+      gl.bindVertexArray(null);
+      return { tex: texture(gl), texBuf, vao, since: 0 };
+    });
     this.count = mesh.triangles.length;
-    gl.bindVertexArray(null);
   }
 
   /** A new swapped face, and where each landmark was inside it (0..1, x/y pairs). */
   setFace(face: TexImageSource, uv: Float32Array) {
     const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.faceTex);
+    this.hasPrevious = this.current >= 0;
+    this.current = (this.current + 1) % 2;
+    const slot = this.slots[this.current];
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, slot.tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, face);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.texBuf);
+    gl.bindBuffer(gl.ARRAY_BUFFER, slot.texBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, uv);
-    this.hasFace = true;
+    slot.since = performance.now();
   }
-  clearFace() { this.hasFace = false; }
+  clearFace() { this.current = -1; this.hasPrevious = false; }
 
   private setSkin(mask: FaceMask | null) {
     const gl = this.gl;
@@ -150,22 +167,29 @@ export class Compositor {
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    if (!points || !this.hasFace || strength <= 0.001) return;
+    if (!points || this.current < 0 || strength <= 0.001) return;
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(this.faceProg);
     gl.uniform2f(gl.getUniformLocation(this.faceProg, 'size'), width, height);
-    gl.uniform1f(gl.getUniformLocation(this.faceProg, 'strength'), strength);
     gl.activeTexture(gl.TEXTURE1);
     this.setSkin(mask);
     gl.uniform1i(gl.getUniformLocation(this.faceProg, 'skin'), 1);
     gl.uniform1i(gl.getUniformLocation(this.faceProg, 'face'), 0);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.faceTex);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, points);
-    gl.bindVertexArray(this.vao);
-    gl.drawElements(gl.TRIANGLES, this.count, gl.UNSIGNED_SHORT, 0);
+    const cur = this.slots[this.current];
+    const t = Math.min(1, (performance.now() - cur.since) / CROSSFADE_MS);
+    const drawSlot = (slot: Slot, alpha: number) => {
+      gl.uniform1f(gl.getUniformLocation(this.faceProg, 'strength'), alpha);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, slot.tex);
+      gl.bindVertexArray(slot.vao);
+      gl.drawElements(gl.TRIANGLES, this.count, gl.UNSIGNED_SHORT, 0);
+    };
+    // The outgoing result underneath at full strength, the new one over it fading in.
+    if (this.hasPrevious && t < 1) drawSlot(this.slots[(this.current + 1) % 2], strength);
+    drawSlot(cur, this.hasPrevious ? strength * t : strength);
     gl.bindVertexArray(null);
   }
 }
