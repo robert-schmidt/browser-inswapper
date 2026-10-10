@@ -7,6 +7,7 @@
   <style>
     :root { --bg: #0d1117; --panel: #161c25; --line: #273042; --text: #e8edf4; --mute: #8f9bb0; --accent: #5fd0ff; }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
     main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
     h1 { font-size: 1.25rem; margin: 0; }
@@ -44,6 +45,19 @@
     .chosen ul { margin: 0; padding-left: 18px; color: var(--mute); font-size: 14px; }
     .chosen .ok { color: #7be0a5; list-style: none; margin-left: -18px; }
     .end { justify-content: flex-end; }
+    section { margin-top: 36px; padding-top: 24px; border-top: 1px solid var(--line); }
+    section h2 { font-size: 1.05rem; margin: 0 0 6px; }
+    section p { margin: 0 0 12px; color: var(--mute); }
+    .tip { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; background: var(--panel); font-size: 14px; }
+    .tip ol { margin: 6px 0 0; padding-left: 20px; }
+    code { background: #0b1220; padding: 1px 6px; border-radius: 6px; font-size: 13px; }
+    .copy { padding: 2px 10px; font-size: 13px; border-radius: 8px; }
+    #videoResult { width: 100%; margin-top: 12px; border-radius: 12px; background: #000; }
+    .wallets { display: grid; gap: 8px; margin: 0; }
+    .wallets div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .wallets dt { color: var(--mute); min-width: 110px; font-size: 14px; }
+    .wallets dd { margin: 0; display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .wallets code { overflow-wrap: anywhere; }
     a { color: var(--accent); }
   </style>
 </head>
@@ -89,6 +103,16 @@
   </div>
   <p id="log" aria-live="polite"></p>
 
+  <div class="tip" id="webnnTip" hidden>
+    <strong>On a Mac? Turn on Chrome's neural network support for about 3× faster swaps.</strong>
+    It lets the browser run the model through Core ML (on an M2 Max: 30 ms per swap instead of 95 ms).
+    <ol>
+      <li>Copy <code>chrome://flags/#web-machine-learning-neural-network</code> <button class="copy" data-copy="chrome://flags/#web-machine-learning-neural-network">Copy</button> and open it in a new tab (Edge: <code>edge://flags</code>, same name).</li>
+      <li>Set <em>Enables WebNN API</em> to <em>Enabled</em>, then click <em>Relaunch</em>.</li>
+      <li>Come back and keep <em>Fastest for this device</em>: it tries both and keeps the faster one.</li>
+    </ol>
+  </div>
+
   <dialog id="photo" aria-labelledby="photoTitle">
     <h2 id="photoTitle">Use this face?</h2>
     <p id="photoPick" hidden>There's more than one face in this photo. Choose the one to use.</p>
@@ -99,6 +123,39 @@
       <button id="photoUse" class="primary">Use this face</button>
     </div>
   </dialog>
+
+  <section aria-labelledby="videoTitle">
+    <h2 id="videoTitle">Swap faces in a video</h2>
+    <p>Choose a face above (or add your own photo), then add a video. Every frame is processed on your computer and
+      nothing is uploaded. Each frame gets a fresh swap, so it takes longer than the video plays.</p>
+    <div class="row">
+      <label class="file">Choose a video… <input id="videoFile" type="file" accept="video/*" hidden /></label>
+      <span id="videoInfo" class="note"></span>
+    </div>
+    <div class="row" id="videoPeopleRow" hidden>
+      <span class="note">People to replace:</span>
+      <div class="faces" id="videoPeople" role="group" aria-label="People to replace"></div>
+    </div>
+    <div class="row">
+      <button id="videoGo" class="primary" disabled>Swap faces in this video</button>
+      <button id="videoCancel" hidden>Cancel</button>
+      <progress id="videoProgress" max="1" hidden></progress>
+      <span id="videoStatus" class="note" aria-live="polite"></span>
+    </div>
+    <video id="videoResult" controls playsinline hidden></video>
+    <div class="row"><a id="videoDownload" hidden></a></div>
+  </section>
+
+  <section aria-labelledby="supportTitle">
+    <h2 id="supportTitle">Free and open</h2>
+    <p>This project is open source because I believe in open/acc. If it's useful to you and you'd like to support
+      the work, donations are welcome:</p>
+    <dl class="wallets">
+      <div><dt>Solana</dt><dd><code>E8tLUC1RhBpRoF1we4onS5MkmpDQVVRvrqbE6Pyhufon</code><button class="copy" data-copy="E8tLUC1RhBpRoF1we4onS5MkmpDQVVRvrqbE6Pyhufon">Copy</button></dd></div>
+      <div><dt>EVM (Ethereum, Base, …)</dt><dd><code>0x8F06CE722d269567EbaEe6eA4fECE247534587A7</code><button class="copy" data-copy="0x8F06CE722d269567EbaEe6eA4fECE247534587A7">Copy</button></dd></div>
+      <div><dt>Bitcoin</dt><dd><code>bc1q0jcp0e4muy53xlaxhz6pszgp8a9jpj6cmd95qh</code><button class="copy" data-copy="bc1q0jcp0e4muy53xlaxhz6pszgp8a9jpj6cmd95qh">Copy</button></dd></div>
+    </dl>
+  </section>
 
   <p class="note">The first start downloads about 300 MB of models (they stay cached in your browser). Works best in
     Chrome or Edge on a computer with a recent graphics card or Apple Silicon.</p>
