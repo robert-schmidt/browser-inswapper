@@ -8,7 +8,8 @@ Built for [heisenbert.com](https://heisenbert.com), the AI co-host for streams a
 
 **[Try the live demo](https://robert-schmidt.github.io/heisenbert-faceswap/)**: it runs in your browser and nothing is uploaded.
 Use your camera or the sample clip, swap faces, morph between them, and record a clip to download. Or add a
-video file: it finds the people in it, you choose who to replace, and you download the swapped video.
+video file: choose up to 60 seconds of it, see the people in that part, choose who each person becomes, and
+download the swapped video.
 
 > **On a Mac?** [Turn on WebNN](#faster-on-macs-turn-on-webnn) in Chrome for about 3× faster swaps.
 
@@ -31,9 +32,9 @@ video file: it finds the people in it, you choose who to replace, and you downlo
   face stays in front instead of being painted over. It runs in its own worker and never holds up the video.
 - **Checks photos.** `findFaces` finds every face in a photo, including small faces in group or full-body
   shots, and flags what would make the result less accurate: a small, turned, blurry, dark or overexposed face.
-- **Swaps faces in video files.** `scanVideo` finds the people in a clip; `swapVideo` replaces everyone, or
-  only the people you choose (recognised on every frame by identity), and returns an MP4 with the original
-  audio. Every frame gets a fresh swap, decoded and encoded by the browser's own hardware codecs (WebCodecs,
+- **Swaps faces in video files.** `scanVideo` finds the people in a clip (or a part of it); `swapVideo` maps
+  each person to a face of your choice (person 1 → one face, person 2 → another, others left alone), recognised
+  on every frame by identity, and returns an MP4 of that part with the original audio. Every frame gets a fresh swap, decoded and encoded by the browser's own hardware codecs (WebCodecs,
   via [Mediabunny](https://mediabunny.dev)). Nothing is uploaded.
 - **Morphs live.** Switching identity blends between the two faces over the time you choose, while recording or streaming.
 - **Fades in and out** without losing the identity (`setStrength`).
@@ -81,15 +82,20 @@ swap.dispose();
 ### Video files
 
 ```ts
-const scan = await swap.scanVideo(file);                 // { people, duration, width, height, fps }
-// scan.people[i].preview is a face crop for a picker; leave `swap` out to replace every face.
-await swap.setIdentity({ image: '/faces/character.png' });
+const { duration } = await swap.videoInfo(file);        // read from the file, no playback needed
+const range = { start: 20, end: 50 };                   // any part; the demo allows up to 60 s
+const scan = await swap.scanVideo(file, range);         // { people, … }: people[i].preview is a face crop
 const mp4 = await swap.swapVideo(file, {
+  ...range,
   people: scan.people,
-  swap: [scan.people[0].id],
+  map: {                                                // person id → identity; null or left out = keep as is
+    [scan.people[0].id]: await swap.identityOf({ image: '/faces/a.png' }),
+    [scan.people[1].id]: await swap.identityOf({ image: '/faces/b.png' }),
+  },
   onProgress: ({ progress, etaSeconds }) => console.log(progress, etaSeconds),
   signal: abortController.signal,
 });
+// Without `map`, every face gets the current identity (setIdentity).
 ```
 
 ### React (Next.js, Remix, Vite…)
@@ -142,7 +148,8 @@ on this model (the M2 Max reaches about 27%). Treat them as a range, and check y
 it shows fps, swaps per second and latency.
 
 Video files take one swap per face per frame, plus decoding and encoding. On the M2 Max with WebGPU, a 6-second
-720p clip (180 frames) took 26 s with one face and 41 s with two; WebNN cuts the swap part to about a third.
+720p clip (180 frames) took 26 s with one face and 41 s with two; mapping two people to two different faces
+took 105 s for 10 seconds of video. WebNN cuts the swap part to about a third.
 
 Other numbers from the M2 Max:
 - **Latency:** 35–40 ms from a camera frame arriving to its swapped copy leaving (tracking and compositing;

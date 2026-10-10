@@ -10,7 +10,8 @@ export type ToWorker =
   | { type: 'frame'; id: number; frame: VideoFrame | ImageBitmap; landmarks: Float32Array | null; ts: number }
   // Video files: identity embeddings for faces in a frame, and a frame with every listed face freshly swapped.
   | { type: 'embed'; id: number; image: ImageBitmap; faces: Float32Array[] }
-  | { type: 'still'; id: number; frame: ImageBitmap; faces: { key: string; points: Float32Array }[]; mask: FaceMask | null };
+  // `identity`: that face's own target (embedding); without it, the current identity is used.
+  | { type: 'still'; id: number; frame: ImageBitmap; faces: { key: string; points: Float32Array; identity?: Float32Array }[]; mask: FaceMask | null };
 
 /** Where the swapped face may show (0–255: 0 where a hand or object is in front), low resolution, whole frame. */
 export type FaceMask = { data: Uint8Array; width: number; height: number };

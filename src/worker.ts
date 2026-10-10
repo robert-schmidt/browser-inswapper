@@ -290,9 +290,11 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
       const latent = currentLatent();
       const w = m.frame.width, h = m.frame.height;
       const faces = [];
-      for (const f of latent ? m.faces : []) {
+      for (const f of m.faces) {
+        const target = f.identity ? identityLatent(f.identity, emap) : latent;
+        if (!target) continue;
         const local = snapshot(stillRegion, m.frame, f.points);
-        const { image, uv } = await swapAt(stillRegion, local, latent!, f.key);
+        const { image, uv } = await swapAt(stillRegion, local, target, f.key);
         faces.push({ image, uv, points: f.points });
       }
       stillCompositor ??= new Compositor(mesh);
