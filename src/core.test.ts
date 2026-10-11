@@ -119,3 +119,30 @@ test('pose blend: matching photo at its angle, halfway between two, clamped past
   close(mid[1], mid[2], 1e-6); close(mid[0], 0);
   assert.equal(latentAt([views[1]], 45), views[1].latent);
 });
+
+test('mesh: triangles wind alike; a folded-over side is found and its silhouette fades', async () => {
+  const { buildMesh, visibility } = await import('./mesh.ts');
+  // A 4×3 strip of squares (vertices 0..19, row-major 5 wide), outline = the border.
+  const W = 5, H = 4, e = (a: number, b: number) => ({ start: a, end: b }), edges = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const v = y * W + x;
+    if (x < W - 1) edges.push(e(v, v + 1));
+    if (y < H - 1) edges.push(e(v, v + W));
+    if (x < W - 1 && y < H - 1) edges.push(e(v, v + W + 1));
+  }
+  const border = [...Array(W * H).keys()].filter((v) => v % W === 0 || v % W === W - 1 || v < W || v >= W * (H - 1));
+  const mesh = buildMesh(edges, border, W * H, [1]);
+  const flat = new Float32Array(W * H * 2);
+  for (let v = 0; v < W * H; v++) { flat[v * 2] = v % W; flat[v * 2 + 1] = Math.floor(v / W); }
+  const facing = visibility(mesh, flat);
+  assert.ok(facing.away.every((a) => a === 0), 'flat: every triangle faces the same way');
+  assert.deepEqual([...facing.weights], [...mesh.weights], 'flat: nothing fades');
+  // Fold the right-hand column back over its neighbour (a head turned far: the far side lands behind).
+  const folded = flat.slice();
+  for (let y = 0; y < H; y++) folded[(y * W + 4) * 2] = 2.5;
+  const f = visibility(mesh, folded);
+  assert.equal(f.away.filter(Boolean).length, 6, 'the folded column faces away');
+  for (let y = 0; y < H; y++) { assert.equal(f.weights[y * W + 3], 0, 'fold line'); }
+  assert.equal(f.weights[1 * W + 2], 0.5, 'one step in');
+  assert.equal(f.weights[1 * W + 1], 1, 'further in');
+});

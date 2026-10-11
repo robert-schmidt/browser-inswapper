@@ -6,10 +6,10 @@
 
 import * as ort from 'onnxruntime-web/all';
 import { Compositor } from './compositor.ts';
-import type { Mesh } from './mesh.ts';
+import { visibility, type Mesh } from './mesh.ts';
 import { candidates, sessionOptions, type Backend, type Capabilities } from './backend.ts';
 import { VectorFilter } from './filters.ts';
-import { FACE_OVAL, apply, keyPoints, similarity, template, toCanvas, type Affine, type Point } from './geometry.ts';
+import { FACE_OVAL, apply, keyPoints, similarity, template, toCanvas, type Affine } from './geometry.ts';
 import { blendLatents, extractEmap, identityLatent, latentAt, type PoseLatent } from './onnx-emap.ts';
 import type { FaceMask, IdentityView, ToMain, ToWorker } from './protocol.ts';
 
@@ -146,23 +146,25 @@ function toFloats(img: ImageData, mean: number, std: number) {
   return t;
 }
 
-/** Soft mask in crop space: the face oval (from the landmarks) feathered, inside a feathered square. */
-function faceMask(ovalCrop: [number, number][]) {
+/**
+ * Soft mask in crop space for the colour match: the inner face (the mesh minus its outer rings, so the hairline
+ * stays out), only where it faces the camera. On a turned head the outline crosses over itself; this doesn't.
+ */
+function faceMask(uv: Float32Array) {
+  const px = uv.map((v) => v * SIZE);
+  const { away } = visibility(mesh, px);
   maskCtx.clearRect(0, 0, SIZE, SIZE);
-  maskCtx.filter = 'blur(5px)';
+  maskCtx.filter = 'blur(3px)';
   maskCtx.fillStyle = '#fff';
   maskCtx.beginPath();
-  // Shrink the oval a little towards its centre: the model redraws the inner face, the hairline stays yours.
-  const cx = ovalCrop.reduce((s, p) => s + p[0], 0) / ovalCrop.length, cy = ovalCrop.reduce((s, p) => s + p[1], 0) / ovalCrop.length;
-  ovalCrop.forEach(([x, y], i) => { const px = cx + (x - cx) * 0.92, py = cy + (y - cy) * 0.9; if (i) maskCtx.lineTo(px, py); else maskCtx.moveTo(px, py); });
-  maskCtx.closePath();
-  maskCtx.fill();
+  const t = mesh.triangles;
+  for (let i = 0; i < away.length; i++) {
+    const [a, b, c] = [t[i * 3], t[i * 3 + 1], t[i * 3 + 2]];
+    if (away[i] || mesh.weights[a] < 1 || mesh.weights[b] < 1 || mesh.weights[c] < 1) continue;
+    maskCtx.moveTo(px[a * 2], px[a * 2 + 1]); maskCtx.lineTo(px[b * 2], px[b * 2 + 1]); maskCtx.lineTo(px[c * 2], px[c * 2 + 1]); maskCtx.closePath();
+  }
+  maskCtx.fill('nonzero');
   maskCtx.filter = 'none';
-  maskCtx.globalCompositeOperation = 'destination-in';
-  maskCtx.filter = 'blur(4px)';
-  maskCtx.fillRect(10, 8, SIZE - 20, SIZE - 14);
-  maskCtx.filter = 'none';
-  maskCtx.globalCompositeOperation = 'source-over';
   return maskCtx.getImageData(0, 0, SIZE, SIZE).data;
 }
 
@@ -205,8 +207,7 @@ async function swapAt(r: Region, local: Float32Array, latent: Float32Array, key:
   const original = alignedPixels(r.canvas, m, SIZE);
   const n = local.length / 2, uv = new Float32Array(n * 2);
   for (let i = 0; i < n; i++) { const [x, y] = apply(m, [local[i * 2], local[i * 2 + 1]]); uv[i * 2] = x / SIZE; uv[i * 2 + 1] = y / SIZE; }
-  const oval = FACE_OVAL.map((i) => [uv[i * 2] * SIZE, uv[i * 2 + 1] * SIZE] as Point);
-  return { image: await swapFace(original, faceMask(oval), latent, key), uv };
+  return { image: await swapFace(original, faceMask(uv), latent, key), uv };
 }
 
 async function identityFromImage(bitmap: ImageBitmap, lm: Float32Array) {

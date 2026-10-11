@@ -4,7 +4,7 @@
 // when the swap ran. So between model runs (~10 per second) the last result still follows head pose, mouth,
 // eyes and brows at the camera's full frame rate, instead of sliding around as a flat picture.
 
-import type { Mesh } from './mesh.ts';
+import { visibility, type Mesh } from './mesh.ts';
 import type { FaceMask } from './protocol.ts';
 
 const FRAME_VS = `#version 300 es
@@ -87,6 +87,8 @@ export class Compositor {
   private frameTex: WebGLTexture;
   private skinTex: WebGLTexture;
   private posBuf: WebGLBuffer;
+  private weightBuf: WebGLBuffer;
+  private mesh: Mesh;
   private slots: Slot[];
   private current = -1; // newest slot; the other one is the result fading out
   private hasPrevious = false;
@@ -111,7 +113,8 @@ export class Compositor {
       return b;
     };
     this.posBuf = buffer(new Float32Array(n * 2), gl.ARRAY_BUFFER, gl.DYNAMIC_DRAW);
-    const weightBuf = buffer(mesh.weights, gl.ARRAY_BUFFER, gl.STATIC_DRAW);
+    this.mesh = mesh;
+    const weightBuf = this.weightBuf = buffer(mesh.weights, gl.ARRAY_BUFFER, gl.DYNAMIC_DRAW);
     const indexBuf = buffer(mesh.triangles, gl.ELEMENT_ARRAY_BUFFER, gl.STATIC_DRAW);
     const bind = (name: string, b: WebGLBuffer, size: number) => {
       const loc = gl.getAttribLocation(this.faceProg, name);
@@ -161,11 +164,29 @@ export class Compositor {
     if (this.canvas.width !== width || this.canvas.height !== height) { this.canvas.width = width; this.canvas.height = height; }
     gl.viewport(0, 0, width, height);
     gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
     gl.useProgram(this.frameProg);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /**
+   * Places the mesh on `points` (pixels): only its side facing the camera is drawn, and a turned head's face fades
+   * out along its silhouette rather than its far side folding over the near one.
+   */
+  private place(points: Float32Array) {
+    const gl = this.gl;
+    const { front, weights } = visibility(this.mesh, points);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, points);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.weightBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, weights);
+    // Pixel y runs down, GL's up: a winding that's positive in pixels is clockwise on screen.
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.frontFace(front > 0 ? gl.CW : gl.CCW);
   }
 
   private beginFaces(width: number, height: number, mask: FaceMask | null) {
@@ -188,8 +209,7 @@ export class Compositor {
     this.beginFaces(width, height, mask);
     for (const f of faces) {
       this.current = -1; this.setFace(f.image, f.uv); this.hasPrevious = false;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuf);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.points);
+      this.place(f.points);
       gl.uniform1f(gl.getUniformLocation(this.faceProg, 'strength'), 1);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.slots[this.current].tex);
@@ -205,8 +225,7 @@ export class Compositor {
     this.drawFrame(frame, width, height);
     if (!points || this.current < 0 || strength <= 0.001) return;
     this.beginFaces(width, height, mask);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuf);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, points);
+    this.place(points);
     const cur = this.slots[this.current];
     const t = Math.min(1, (performance.now() - cur.since) / CROSSFADE_MS);
     const drawSlot = (slot: Slot, alpha: number) => {
