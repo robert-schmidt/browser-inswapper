@@ -11,7 +11,7 @@ import { probe, rememberedBackend, rememberBackend, swapperPrecision, type Backe
 import { DEFAULT_LANDMARKER, DEFAULT_SEGMENTER, loadModel, type ModelSet, type ModelSpec, type Progress } from './models.ts';
 import type { ToMain, ToWorker } from './protocol.ts';
 import { buildMesh } from './mesh.ts';
-import { FACE_OVAL, keyPoints, similarity, template, toCanvas, yawOf } from './geometry.ts';
+import { EYES, FACE_OVAL, keyPoints, similarity, template, toCanvas, yawOf } from './geometry.ts';
 import { faceIssues, type FaceIssue } from './faces.ts';
 import type { FaceMask, IdentityView } from './protocol.ts';
 import type { SwapVideoOptions, VideoEngine, VideoInfo, VideoRange, VideoScan } from './video.ts';
@@ -191,7 +191,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
       pending.clear();
     };
   }, () => {});
-  send({ type: 'init', swapper: swapBytes, backend: wanted, caps, wasmPaths: opts.ortWasmPaths ?? ORT_CDN, mesh: buildMesh(FaceLandmarker.FACE_LANDMARKS_TESSELATION, FACE_OVAL), masks: segWorker ? masks.port2 : undefined },
+  send({ type: 'init', swapper: swapBytes, backend: wanted, caps, wasmPaths: opts.ortWasmPaths ?? ORT_CDN, mesh: buildMesh(FaceLandmarker.FACE_LANDMARKS_TESSELATION, FACE_OVAL, 478, undefined, EYES), masks: segWorker ? masks.port2 : undefined },
     segWorker ? [swapBytes, masks.port2] : [swapBytes]);
   const { backend } = await ready;
   if (wanted === 'auto') rememberBackend(backend, caps); // a forced choice isn't a benchmark result

@@ -6,8 +6,11 @@
 /** `contour`: 1 for vertices on the face outline. */
 export type Mesh = { triangles: Uint16Array; weights: Float32Array; contour: Uint8Array };
 
-/** `edges`: FaceLandmarker.FACE_LANDMARKS_TESSELATION. `contour`: the outline (FACE_OVAL). `fade`: opacity by ring. */
-export function buildMesh(edges: { start: number; end: number }[], contour: number[], vertices = 478, fade = [0.1, 0.75]): Mesh {
+/**
+ * `edges`: FaceLandmarker.FACE_LANDMARKS_TESSELATION. `contour`: the outline (FACE_OVAL). `fade`: opacity by ring.
+ * `holes`: openings to fill, each from a centre point to the ring of points around it (the eyes: EYES).
+ */
+export function buildMesh(edges: { start: number; end: number }[], contour: number[], vertices = 478, fade = [0.1, 0.75], holes: { center: number; rim: number[] }[] = []): Mesh {
   const adj = Array.from({ length: vertices }, () => new Set<number>());
   for (const { start: a, end: b } of edges) { adj[a].add(b); adj[b].add(a); }
   // Every 3-cycle of the planar mesh is a face triangle (the mesh has no separating triangles worth worrying about).
@@ -17,6 +20,13 @@ export function buildMesh(edges: { start: number; end: number }[], contour: numb
       if (b <= a) continue;
       for (const c of adj[b]) if (c > b && adj[a].has(c)) tris.push(a, b, c);
     }
+  }
+  for (const { center, rim } of holes) {
+    rim.forEach((v, i) => {
+      const w = rim[(i + 1) % rim.length];
+      tris.push(center, v, w);
+      adj[center].add(v); adj[v].add(center);
+    });
   }
   orient(tris);
   // Rings inward from the contour, by graph distance.

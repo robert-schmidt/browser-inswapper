@@ -61,6 +61,15 @@ export function keyPoints(lm: ArrayLike<number>, width: number, height: number, 
   return [eyes[0], eyes[1], p(NOSE_TIP), mouth[0], mouth[1]];
 }
 
+/**
+ * The eye openings: each iris centre and the eyelid rim around it, in order. MediaPipe's mesh leaves the openings
+ * empty; filled from the iris centre, the swapped eyes are drawn too, and follow the gaze on every frame.
+ */
+export const EYES = [
+  { center: 468, rim: [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7] },
+  { center: 473, rim: [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249] },
+];
+
 /** MediaPipe's face-oval contour, in order (for the paste-back mask). */
 export const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
 

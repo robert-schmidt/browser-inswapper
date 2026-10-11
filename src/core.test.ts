@@ -168,3 +168,16 @@ test('face filter: keeps up with a fast moving, tilting head; still face as stea
   assert.ok(now.lag < 4, `lag ${now.lag.toFixed(1)} px`);
   assert.ok(now.jitter < old.jitter * 1.25, `jitter ${now.jitter.toFixed(2)} vs ${old.jitter.toFixed(2)}`);
 });
+
+test('mesh: the eye openings are filled from the iris centre', async () => {
+  const { buildMesh } = await import('./mesh.ts');
+  const { EYES } = await import('./geometry.ts');
+  // A ring with nothing inside (as MediaPipe's mesh leaves the eyes), plus an outer ring around it.
+  const e = (a: number, b: number) => ({ start: a, end: b }), rim = [0, 1, 2, 3], outer = [4, 5, 6, 7];
+  const edges = [...rim.map((v, i) => e(v, rim[(i + 1) % 4])), ...outer.map((v, i) => e(v, outer[(i + 1) % 4])), ...rim.map((v, i) => e(v, outer[i])), ...rim.map((v, i) => e(rim[(i + 1) % 4], outer[i]))];
+  const without = buildMesh(edges, outer, 9, [1]);
+  const filled = buildMesh(edges, outer, 9, [1], [{ center: 8, rim }]);
+  assert.equal(filled.triangles.length / 3, without.triangles.length / 3 + 4);
+  assert.ok([...filled.triangles].includes(8));
+  assert.deepEqual(EYES.map((x) => x.rim.length), [16, 16]);
+});
