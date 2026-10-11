@@ -44,8 +44,8 @@ out vec4 color;
 void main() {
   // Fade near the crop's border too, where the model has no face to draw.
   vec2 e = smoothstep(0.0, 0.06, uv) * smoothstep(0.0, 0.06, 1.0 - uv);
-  // A hand or mic in front of the face stays in front.
-  float s = smoothstep(0.3, 0.7, texture(skin, vec2(gl_FragCoord.x / size.x, 1.0 - gl_FragCoord.y / size.y)).r);
+  // A hand or mic in front of the face stays in front, its edge given a little extra room (the mask is low resolution).
+  float s = smoothstep(0.45, 0.85, texture(skin, vec2(gl_FragCoord.x / size.x, 1.0 - gl_FragCoord.y / size.y)).r);
   color = vec4(texture(face, uv).rgb, w * e.x * e.y * s * strength);
 }`;
 

@@ -134,18 +134,20 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     : new Worker(new URL('./segment-worker.ts', import.meta.url), { type: 'module', name });
   const segWorker = segmenterBytes ? occlusionWorker('heisenbert-faceswap-occlusion') : null;
   const masks = new MessageChannel();
-  let segIdle = false, lastSeg = 0;
+  let segIdle = false, lastSeg = 0, segSent = 0, segMs = 60;
   if (segWorker) {
     segWorker.onmessage = (e: MessageEvent<{ type: string; message?: string }>) => {
+      if (e.data.type === 'done') segMs = segMs * 0.8 + (performance.now() - segSent) * 0.2;
       if (e.data.type === 'ready' || e.data.type === 'done') segIdle = true;
       else if (e.data.type === 'error') opts.onLog?.(`occlusion off: ${e.data.message}`);
     };
     segWorker.postMessage({ type: 'init', model: segmenterBytes, wasm: opts.mediapipeWasm ?? MP_CDN, port: masks.port1 }, [segmenterBytes!, masks.port1]);
   }
   const segment = (source: CanvasImageSource | VideoFrame, w: number, h: number, ts: number) => {
-    // ponytail: 8 masks/s keeps the GPU for the swap; raise on fast GPUs if hands visibly lag.
-    if (!segWorker || !segIdle || !w || ts - lastSeg < 125) return;
-    segIdle = false; lastSeg = ts;
+    // As often as the device keeps up: the segmenter busy at most half the time (every frame on a fast GPU, so a
+    // hand in front of the face is masked where it is now, not where it was), and at least 8 masks a second.
+    if (!segWorker || !segIdle || !w || ts - lastSeg < Math.min(125, 2 * segMs)) return;
+    segIdle = false; lastSeg = ts; segSent = performance.now();
     const copy = typeof VideoFrame !== 'undefined' && source instanceof VideoFrame ? source.clone() : source;
     createImageBitmap(copy as ImageBitmapSource, { resizeWidth: 256, resizeHeight: Math.max(16, Math.round((256 * h) / w)), resizeQuality: 'low' })
       .then((bitmap) => segWorker.postMessage({ type: 'frame', bitmap, ts }, [bitmap]))

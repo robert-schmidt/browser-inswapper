@@ -9,7 +9,7 @@ import { Compositor } from './compositor.ts';
 import { visibility, type Mesh } from './mesh.ts';
 import { candidates, sessionOptions, type Backend, type Capabilities } from './backend.ts';
 import { FaceFilter } from './filters.ts';
-import { FACE_OVAL, apply, keyPoints, similarity, template, toCanvas, type Affine } from './geometry.ts';
+import { FACE_OVAL, apply, invert, keyPoints, similarity, template, toCanvas, type Affine } from './geometry.ts';
 import { blendLatents, extractEmap, identityLatent, latentAt, type PoseLatent } from './onnx-emap.ts';
 import type { FaceMask, IdentityView, ToMain, ToWorker } from './protocol.ts';
 
@@ -31,6 +31,8 @@ let emap: Float32Array;
 let latentFrom: PoseLatent[] | null = null;
 let latentTo: PoseLatent[] | null = null;
 let liveYaw = 0; // the live face's head turn, smoothed
+let lastLive: { points: Float32Array; ts: number } | null = null; // the face's last tracked position
+const HOLD_MS = 200; // how long a lost face stays where it was (longer: a face that left lingers)
 let morphStart = 0, morphMs = 0;
 let strengthFrom = 0, strengthTo = 0, strengthStart = 0, strengthMs = 0;
 
@@ -49,8 +51,9 @@ const cropCtx = crop.getContext('2d', { willReadFrequently: true })!;
 // A copy of the square around the face, taken while the frame is still here, so detection and the swap can
 // run after it's gone. One per user (live swap, photo identities, video files), so they never share one.
 const REGION = 384;
-type Region = { canvas: OffscreenCanvas; ctx: OffscreenCanvasRenderingContext2D };
-const makeRegion = (): Region => { const canvas = new OffscreenCanvas(REGION, REGION); return { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true })! }; };
+// `ox`, `oy`, `k`: where the copy came from in the frame (frame pixel = copy pixel / k + origin).
+type Region = { canvas: OffscreenCanvas; ctx: OffscreenCanvasRenderingContext2D; ox: number; oy: number; k: number };
+const makeRegion = (): Region => { const canvas = new OffscreenCanvas(REGION, REGION); return { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true })!, ox: 0, oy: 0, k: 1 }; };
 const liveRegion = makeRegion(), photoRegion = makeRegion(), stillRegion = makeRegion();
 const maskCanvas = new OffscreenCanvas(SIZE, SIZE);
 const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })!;
@@ -127,6 +130,7 @@ function snapshot(r: Region, source: CanvasImageSource, points: Float32Array) {
   const side = 1.6 * Math.max(x1 - x0, y1 - y0), ox = (x0 + x1 - side) / 2, oy = (y0 + y1 - side) / 2, k = REGION / side;
   r.ctx.clearRect(0, 0, REGION, REGION);
   r.ctx.drawImage(source, ox, oy, side, side, 0, 0, REGION, REGION);
+  r.ox = ox; r.oy = oy; r.k = k;
   const local = new Float32Array(points.length);
   for (let i = 0; i < points.length; i += 2) { local[i] = (points[i] - ox) * k; local[i + 1] = (points[i + 1] - oy) * k; }
   return local;
@@ -202,12 +206,26 @@ async function swapFace(original: ImageData, mask: Uint8ClampedArray, latent: Fl
 }
 
 /** Aligns and swaps a face already copied into `r` (`local`: its landmarks there): the swapped face and where each landmark sits in it. */
-async function swapAt(r: Region, local: Float32Array, latent: Float32Array, key: string) {
+/**
+ * Aligns and swaps a face already copied into `r` (`local`: its landmarks there): the swapped face and where each
+ * landmark sits in it. `occlusion`: what's in front of the face in the frame (`w`×`h`), left out of the colour
+ * match so a hand or sleeve doesn't tint the face.
+ */
+async function swapAt(r: Region, local: Float32Array, latent: Float32Array, key: string, occlusion: { mask: FaceMask; w: number; h: number } | null = null) {
   const m = similarity(keyPoints(local, 1, 1, 2), template(SIZE));
   const original = alignedPixels(r.canvas, m, SIZE);
   const n = local.length / 2, uv = new Float32Array(n * 2);
   for (let i = 0; i < n; i++) { const [x, y] = apply(m, [local[i * 2], local[i * 2 + 1]]); uv[i * 2] = x / SIZE; uv[i * 2 + 1] = y / SIZE; }
-  return { image: await swapFace(original, faceMask(uv), latent, key), uv };
+  const mask = faceMask(uv);
+  if (occlusion) {
+    const { mask: o, w, h } = occlusion, back = invert(m), sx = o.width / w, sy = o.height / h;
+    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+      const [rx, ry] = apply(back, [x + 0.5, y + 0.5]);
+      const mx = Math.floor((rx / r.k + r.ox) * sx), my = Math.floor((ry / r.k + r.oy) * sy);
+      if (mx >= 0 && my >= 0 && mx < o.width && my < o.height && o.data[my * o.width + mx] < 128) mask[(y * SIZE + x) * 4 + 3] = 0;
+    }
+  }
+  return { image: await swapFace(original, mask, latent, key), uv };
 }
 
 async function identityFromImage(bitmap: ImageBitmap, lm: Float32Array) {
@@ -226,8 +244,8 @@ async function identityFromImage(bitmap: ImageBitmap, lm: Float32Array) {
 }
 
 /** The live swap: on a copy taken from the frame (which has moved on by the time this finishes). */
-async function swapJob(local: Float32Array, latent: Float32Array) {
-  const { image, uv } = await swapAt(liveRegion, local, latent, 'live');
+async function swapJob(local: Float32Array, latent: Float32Array, w: number, h: number) {
+  const { image, uv } = await swapAt(liveRegion, local, latent, 'live', latestMask && { mask: latestMask, w, h });
   faceCtx.putImageData(image, 0, 0);
   compositor.setFace(face, uv);
 }
@@ -237,20 +255,24 @@ function render(frame: VideoFrame | ImageBitmap, lm: Float32Array | null, yaw: n
   const h = 'displayHeight' in frame ? frame.displayHeight : frame.height;
   const strength = currentStrength();
   let points: Float32Array | null = null;
-  if (lm) {
+  // A hand over the face can make tracking drop out for a frame or two: keep the face where it was meanwhile,
+  // rather than flashing the original face through.
+  if (!lm && lastLive && ts - lastLive.ts < HOLD_MS) points = lastLive.points;
+  else if (lm) {
     const n = lm.length / 3, raw = new Array<number>(n * 2);
     for (let i = 0; i < n; i++) { raw[i * 2] = lm[i * 3] * w; raw[i * 2 + 1] = lm[i * 3 + 1] * h; }
     points = Float32Array.from(smooth.filter(raw, ts));
+    lastLive = { points, ts };
     liveYaw += (yaw - liveYaw) * YAW_FOLLOW;
     // Start a swap when the model is free; frames keep flowing meanwhile, drawn with the last result.
     const latent = currentLatent(liveYaw);
     if (strength > 0.001 && !busy && latent && swapper) {
       busy = true;
       const local = snapshot(liveRegion, frame, points);
-      swapJob(local, latent).catch((err) => post({ type: 'log', message: `swap failed: ${err}` })).finally(() => { busy = false; });
+      swapJob(local, latent, w, h).catch((err) => post({ type: 'log', message: `swap failed: ${err}` })).finally(() => { busy = false; });
     }
   } else {
-    smooth.reset();
+    smooth.reset(); lastLive = null;
     compositor.clearFace(); // a new face appearing shouldn't get the old one's pixels
   }
   compositor.draw(frame, w, h, points, strength, latestMask);
@@ -306,7 +328,7 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
         const target = f.identity ? latentAt(poseLatents(f.identity), f.yaw) : currentLatent(f.yaw);
         if (!target) continue;
         const local = snapshot(stillRegion, m.frame, f.points);
-        const { image, uv } = await swapAt(stillRegion, local, target, f.key);
+        const { image, uv } = await swapAt(stillRegion, local, target, f.key, m.mask && { mask: m.mask, w, h });
         faces.push({ image, uv, points: f.points });
       }
       stillCompositor ??= new Compositor(mesh);
