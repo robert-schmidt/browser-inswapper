@@ -164,8 +164,8 @@ function faceMask(uv: Float32Array) {
   const t = mesh.triangles;
   for (let i = 0; i < away.length; i++) {
     const [a, b, c] = [t[i * 3], t[i * 3 + 1], t[i * 3 + 2]];
-    // Skin only: not the outer rings (hairline) nor the eyes (irises and eye whites would skew the light).
-    if (away[i] || mesh.weights[a] < 1 || mesh.weights[b] < 1 || mesh.weights[c] < 1 || a >= 468 || b >= 468 || c >= 468) continue;
+    // Skin only: not the outer rings (hairline) nor the filled eyes and mouth (eye whites and teeth would skew the light).
+    if (i >= mesh.skin || away[i] || mesh.weights[a] < 1 || mesh.weights[b] < 1 || mesh.weights[c] < 1) continue;
     maskCtx.moveTo(px[a * 2], px[a * 2 + 1]); maskCtx.lineTo(px[b * 2], px[b * 2 + 1]); maskCtx.lineTo(px[c * 2], px[c * 2 + 1]); maskCtx.closePath();
   }
   maskCtx.fill('nonzero');

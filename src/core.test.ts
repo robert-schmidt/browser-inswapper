@@ -169,7 +169,7 @@ test('face filter: keeps up with a fast moving, tilting head; still face as stea
   assert.ok(now.jitter < old.jitter * 1.25, `jitter ${now.jitter.toFixed(2)} vs ${old.jitter.toFixed(2)}`);
 });
 
-test('mesh: the eye openings are filled from the iris centre', async () => {
+test('mesh: the eye openings are filled from the iris centre, the mouth across the lips', async () => {
   const { buildMesh } = await import('./mesh.ts');
   const { EYES } = await import('./geometry.ts');
   // A ring with nothing inside (as MediaPipe's mesh leaves the eyes), plus an outer ring around it.
@@ -180,6 +180,10 @@ test('mesh: the eye openings are filled from the iris centre', async () => {
   assert.equal(filled.triangles.length / 3, without.triangles.length / 3 + 4);
   assert.ok([...filled.triangles].includes(8));
   assert.deepEqual(EYES.map((x) => x.rim.length), [16, 16]);
+  // Lips: upper 0-1-2 and lower 0-3-2 meet at the corners; the strip between them is two triangles, none degenerate.
+  const mouth = buildMesh(edges, outer, 9, [1], [{ upper: [0, 1, 2], lower: [0, 3, 2] }]);
+  assert.equal(mouth.triangles.length / 3, without.triangles.length / 3 + 2);
+  assert.equal(mouth.skin, without.triangles.length / 3);
 });
 
 test('models download into one buffer, with or without a length header', async () => {

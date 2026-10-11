@@ -44,7 +44,7 @@ export const toCanvas = ([a, b, c, d, e, f]: Affine): [number, number, number, n
 
 // MediaPipe Face Landmarker (478 points, with irises) → the 5 key points. Pairs are sorted by x so a mirrored
 // camera still gives "image left" first, as the models expect.
-const IRIS = [468, 473], EYE_CORNERS = [[33, 133], [362, 263]], NOSE_TIP = 1, MOUTH = [61, 291];
+const IRIS = [468, 473], EYE_CORNERS = [[33, 133], [362, 263]], NOSE_TIP = 1, MOUTH_CORNERS = [61, 291];
 export function keyPoints(lm: ArrayLike<number>, width: number, height: number, stride = 3): Point[] {
   const p = (i: number): Point => [lm[i * stride] * width, lm[i * stride + 1] * height];
   const mid = (i: number, j: number): Point => { const a = p(i), b = p(j); return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]; };
@@ -57,7 +57,7 @@ export function keyPoints(lm: ArrayLike<number>, width: number, height: number, 
     return [iris[0] * 0.6 + c[0] * 0.4, iris[1] * 0.6 + c[1] * 0.4];
   };
   const eyes = [eye(0), eye(1)].sort((u, v) => u[0] - v[0]);
-  const mouth = [p(MOUTH[0]), p(MOUTH[1])].sort((u, v) => u[0] - v[0]);
+  const mouth = [p(MOUTH_CORNERS[0]), p(MOUTH_CORNERS[1])].sort((u, v) => u[0] - v[0]);
   return [eyes[0], eyes[1], p(NOSE_TIP), mouth[0], mouth[1]];
 }
 
@@ -69,6 +69,12 @@ export const EYES = [
   { center: 468, rim: [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7] },
   { center: 473, rim: [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249] },
 ];
+
+/** The mouth opening, inner lip edges from corner to corner: filled, the swapped teeth move with the swapped lips. */
+export const MOUTH = {
+  upper: [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308],
+  lower: [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308],
+};
 
 /** MediaPipe's face-oval contour, in order (for the paste-back mask). */
 export const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];

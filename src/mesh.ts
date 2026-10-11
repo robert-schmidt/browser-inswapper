@@ -3,14 +3,16 @@
 // Triangles all wind the same way, so the ones facing away from the camera (the far side of a turned head,
 // folded over the near side) can be told apart and left out.
 
-/** `contour`: 1 for vertices on the face outline. */
-export type Mesh = { triangles: Uint16Array; weights: Float32Array; contour: Uint8Array };
+/** `contour`: 1 for vertices on the face outline. `skin`: how many triangles come first that aren't filled openings. */
+export type Mesh = { triangles: Uint16Array; weights: Float32Array; contour: Uint8Array; skin: number };
+/** An opening to fill: a ring around a centre point (an eye), or two edges meeting at both ends (the lips). */
+export type Hole = { center: number; rim: number[] } | { upper: number[]; lower: number[] };
 
 /**
  * `edges`: FaceLandmarker.FACE_LANDMARKS_TESSELATION. `contour`: the outline (FACE_OVAL). `fade`: opacity by ring.
- * `holes`: openings to fill, each from a centre point to the ring of points around it (the eyes: EYES).
+ * `holes`: openings to fill (EYES, MOUTH).
  */
-export function buildMesh(edges: { start: number; end: number }[], contour: number[], vertices = 478, fade = [0.1, 0.75], holes: { center: number; rim: number[] }[] = []): Mesh {
+export function buildMesh(edges: { start: number; end: number }[], contour: number[], vertices = 478, fade = [0.1, 0.75], holes: Hole[] = []): Mesh {
   const adj = Array.from({ length: vertices }, () => new Set<number>());
   for (const { start: a, end: b } of edges) { adj[a].add(b); adj[b].add(a); }
   // Every 3-cycle of the planar mesh is a face triangle (the mesh has no separating triangles worth worrying about).
@@ -21,12 +23,17 @@ export function buildMesh(edges: { start: number; end: number }[], contour: numb
       for (const c of adj[b]) if (c > b && adj[a].has(c)) tris.push(a, b, c);
     }
   }
-  for (const { center, rim } of holes) {
-    rim.forEach((v, i) => {
-      const w = rim[(i + 1) % rim.length];
-      tris.push(center, v, w);
-      adj[center].add(v); adj[v].add(center);
-    });
+  const skin = tris.length / 3;
+  const fill = (a: number, b: number, c: number) => {
+    if (a === b || b === c || a === c) return;
+    tris.push(a, b, c);
+    for (const [x, y] of [[a, b], [b, c], [a, c]]) { adj[x].add(y); adj[y].add(x); }
+  };
+  for (const h of holes) {
+    // A ring: a fan from the centre. Two edges: a strip across from one to the other, which keeps its shape
+    // when the mouth curves in a smile (a fan from one point would fold over).
+    if ('center' in h) h.rim.forEach((v, i) => fill(h.center, v, h.rim[(i + 1) % h.rim.length]));
+    else for (let i = 0; i + 1 < h.upper.length; i++) { fill(h.upper[i], h.upper[i + 1], h.lower[i + 1]); fill(h.upper[i], h.lower[i + 1], h.lower[i]); }
   }
   orient(tris);
   // Rings inward from the contour, by graph distance.
@@ -42,7 +49,7 @@ export function buildMesh(edges: { start: number; end: number }[], contour: numb
   for (let i = 0; i < vertices; i++) weights[i] = ring[i] === -1 ? 1 : fade[ring[i]];
   const onContour = new Uint8Array(vertices);
   for (const i of contour) if (i < vertices) onContour[i] = 1;
-  return { triangles: new Uint16Array(tris), weights, contour: onContour };
+  return { triangles: new Uint16Array(tris), weights, contour: onContour, skin };
 }
 
 /** Makes every triangle wind like its neighbours (a shared edge runs opposite ways in the two), in place. */
