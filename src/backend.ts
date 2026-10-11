@@ -57,6 +57,7 @@ export function sessionOptions(backend: Backend, c: Capabilities) {
   return { ...base, executionProviders: ['wasm'] as const, intraOpNumThreads: c.wasmThreads ? Math.max(1, Math.min(8, c.cores - 1)) : 1 };
 }
 
+// ponytail: pre-rename name kept so returning visitors keep their benchmark.
 const KEY = 'heisenbert-faceswap:backend';
 // What the benchmark ran on: a result only stands while this stays the same, so turning WebNN on, a new GPU or a
 // browser update gets a fresh benchmark (a bare remembered name kept WebGPU after WebNN was switched on).

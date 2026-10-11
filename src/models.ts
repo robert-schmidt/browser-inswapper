@@ -36,6 +36,7 @@ export const DEFAULT_SEGMENTER: ModelSpec = {
 };
 
 export type Progress = { model: string; loaded: number; total: number };
+// ponytail: pre-rename name kept so returning visitors don't download the models again.
 const CACHE = 'heisenbert-faceswap-models-v1';
 
 async function sha256(buf: ArrayBuffer) {

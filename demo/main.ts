@@ -372,7 +372,7 @@ rec.onclick = () => {
     const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
     if (download.href) URL.revokeObjectURL(download.href);
     download.href = URL.createObjectURL(blob);
-    download.download = `heisenbert-faceswap-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${ext}`;
+    download.download = `browser-inswapper-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${ext}`;
     download.textContent = `Download recording (${Math.round((performance.now() - started) / 1000)} s, ${(blob.size / 1e6).toFixed(1)} MB)`;
     download.hidden = false;
   };

@@ -1,4 +1,4 @@
-// heisenbert-faceswap: real-time face swap in the browser, with live identity morphing.
+// browser-inswapper: real-time face swap in the browser, with live identity morphing.
 // Built for heisenbert.com. PolyForm Noncommercial 1.0.0; for commercial use, email robert@chronic.ro first.
 //
 //   const swap = await createFaceSwap({ models, onProgress });
@@ -132,7 +132,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   const occlusionWorker = (name: string) => opts.workers?.occlusion
     ? new Worker(opts.workers.occlusion, { type: 'module', name })
     : new Worker(new URL('./segment-worker.ts', import.meta.url), { type: 'module', name });
-  const segWorker = segmenterBytes ? occlusionWorker('heisenbert-faceswap-occlusion') : null;
+  const segWorker = segmenterBytes ? occlusionWorker('browser-inswapper-occlusion') : null;
   const masks = new MessageChannel();
   let segIdle = false, lastSeg = 0, segSent = 0, segMs = 60;
   if (segWorker) {
@@ -158,8 +158,8 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     'displayWidth' in s ? [s.displayWidth, s.displayHeight] : 'videoWidth' in s ? [s.videoWidth, s.videoHeight] : [Number((s as HTMLCanvasElement).width), Number((s as HTMLCanvasElement).height)];
 
   const worker = opts.workers?.swap
-    ? new Worker(opts.workers.swap, { type: 'module', name: 'heisenbert-faceswap' })
-    : new Worker(new URL('./worker.ts', import.meta.url), { type: 'module', name: 'heisenbert-faceswap' });
+    ? new Worker(opts.workers.swap, { type: 'module', name: 'browser-inswapper' })
+    : new Worker(new URL('./worker.ts', import.meta.url), { type: 'module', name: 'browser-inswapper' });
   const pending = new Map<number, (m: ToMain) => void>();
   let seq = 0;
   let lastStats: Stats | null = null;
@@ -236,7 +236,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     },
     occlusion() {
       if (!segmenterCopy) return null;
-      const w = occlusionWorker('heisenbert-faceswap-video-occlusion');
+      const w = occlusionWorker('browser-inswapper-video-occlusion');
       const ready = new Promise<void>((resolve) => { w.onmessage = (e) => { if (e.data.type === 'ready' || e.data.type === 'error') resolve(); }; });
       w.postMessage({ type: 'init', model: segmenterCopy.slice(0), wasm: opts.mediapipeWasm ?? MP_CDN });
       return {

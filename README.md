@@ -1,4 +1,4 @@
-# heisenbert-faceswap
+# browser-inswapper
 
 Real-time face swap that runs entirely in the browser: no server, nothing uploaded. Give it a camera track
 and a face, get back a swapped `MediaStreamTrack` you can show, record or stream. Switch faces while it runs
@@ -6,7 +6,7 @@ and it morphs smoothly from one to the next.
 
 Built for [heisenbert.com](https://heisenbert.com), the AI co-host for streams and recordings.
 
-**[Try the live demo](https://robert-schmidt.github.io/heisenbert-faceswap/)**: it runs in your browser and nothing is uploaded.
+**[Try the live demo](https://robert-schmidt.github.io/browser-inswapper/)**: it runs in your browser and nothing is uploaded.
 Use your camera or the sample clip, swap faces, morph between them, and record a clip to download. Or add a
 video file: choose up to 60 seconds of it, see the people in that part, choose who each person becomes, and
 download the swapped video.
@@ -46,13 +46,13 @@ download the swapped video.
 ## Install
 
 ```sh
-npm install heisenbert-faceswap
+npm install browser-inswapper
 ```
 
 ## Quick start
 
 ```ts
-import { createFaceSwap, KNOWN_SHA256 } from 'heisenbert-faceswap';
+import { createFaceSwap, KNOWN_SHA256 } from 'browser-inswapper';
 
 const base = 'https://your-cdn.example/models/';
 const swap = await createFaceSwap({
@@ -108,7 +108,7 @@ const mp4 = await swap.swapVideo(file, {
 ```tsx
 'use client';
 import { useMemo, useState } from 'react';
-import { useFaceSwap, useSwappedTrack, TrackVideo } from 'heisenbert-faceswap/react';
+import { useFaceSwap, useSwappedTrack, TrackVideo } from 'browser-inswapper/react';
 
 export function Mirror({ camera }: { camera: MediaStreamTrack }) {
   const options = useMemo(() => ({ models }), []);

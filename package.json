@@ -1,14 +1,14 @@
 {
-  "name": "heisenbert-faceswap",
+  "name": "browser-inswapper",
   "version": "0.1.0",
   "description": "Real-time face swap in the browser (WebGPU, WebNN or CPU), with live identity morphing. Built for heisenbert.com.",
   "license": "SEE LICENSE IN LICENSE.md",
   "type": "module",
   "author": "Chronic Qual SRL <robert@chronic.ro> (https://heisenbert.com)",
-  "homepage": "https://github.com/robert-schmidt/heisenbert-faceswap",
+  "homepage": "https://github.com/robert-schmidt/browser-inswapper",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/robert-schmidt/heisenbert-faceswap.git"
+    "url": "git+https://github.com/robert-schmidt/browser-inswapper.git"
   },
   "sideEffects": false,
   "exports": {
@@ -64,6 +64,11 @@
   },
   "keywords": [
     "face swap",
+    "faceswap",
+    "inswapper",
+    "deepfake",
+    "arcface",
+    "webcam",
     "webgpu",
     "webnn",
     "onnxruntime-web",
