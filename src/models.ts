@@ -57,21 +57,26 @@ export async function loadModel(name: string, spec: ModelSpec, onProgress?: (p: 
   const res = await fetch(spec.url, { signal, credentials: 'omit' });
   if (!res.ok || !res.body) throw new Error(`Couldn’t download ${name} (${res.status}).`);
   const total = Number(res.headers.get('content-length')) || spec.bytes || 0;
+  // Into one buffer as it arrives, not chunks plus a joined copy plus a copy for the cache: phones kill a tab
+  // that holds three copies of a 280 MB model at once (it looks like the page reloading by itself).
   const reader = res.body.getReader();
-  const parts: Uint8Array[] = [];
+  let bytes = new Uint8Array(total);
   let loaded = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    parts.push(value);
+    if (loaded + value.byteLength > bytes.byteLength) { // no or wrong length header: grow
+      const grown = new Uint8Array(Math.max(loaded + value.byteLength, bytes.byteLength * 2));
+      grown.set(bytes.subarray(0, loaded)); bytes = grown;
+    }
+    bytes.set(value, loaded);
     loaded += value.byteLength;
     onProgress?.({ model: name, loaded, total: Math.max(total, loaded) });
   }
-  const bytes = new Uint8Array(loaded);
-  let o = 0;
-  for (const p of parts) { bytes.set(p, o); o += p.byteLength; }
+  if (loaded < bytes.byteLength) bytes = bytes.slice(0, loaded);
   if (spec.sha256 && (await sha256(bytes.buffer)) !== spec.sha256) throw new Error(`${name} didn’t match its fingerprint; not used.`);
-  await cache?.put(key, new Response(bytes.slice().buffer, { headers: { 'content-type': 'application/octet-stream' } })).catch(() => {});
+  // Awaited before returning: the caller hands the buffer to a worker, which empties it here.
+  await cache?.put(key, new Response(bytes, { headers: { 'content-type': 'application/octet-stream' } })).catch(() => {});
   return bytes.buffer;
 }
 

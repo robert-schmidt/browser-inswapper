@@ -181,3 +181,15 @@ test('mesh: the eye openings are filled from the iris centre', async () => {
   assert.ok([...filled.triangles].includes(8));
   assert.deepEqual(EYES.map((x) => x.rim.length), [16, 16]);
 });
+
+test('models download into one buffer, with or without a length header', async () => {
+  const { loadModel } = await import('./models.ts');
+  const data = Uint8Array.from({ length: 100_000 }, (_, i) => i % 251);
+  const real = globalThis.fetch;
+  for (const length of [String(data.length), null]) {
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      start(c) { for (let o = 0; o < data.length; o += 7000) c.enqueue(data.slice(o, o + 7000)); c.close(); },
+    }), { headers: length ? { 'content-length': length } : {} });
+    try { assert.deepEqual(new Uint8Array(await loadModel('m', { url: 'x' })), data); } finally { globalThis.fetch = real; }
+  }
+});

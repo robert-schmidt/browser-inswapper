@@ -50,7 +50,8 @@ export function swapperPrecision(backend: Backend, c: Capabilities): 'fp16' | 'f
 /** ONNX Runtime session options for a backend. */
 export function sessionOptions(backend: Backend, c: Capabilities) {
   // 'all' fuses Conv+activation into FusedConv, which WebGPU only has in fp32: GPUs get the safe 'basic' level.
-  const base = { graphOptimizationLevel: backend === 'wasm' ? 'all' as const : 'basic' as const };
+  // No CPU memory arena: it keeps the largest buffers ever used reserved, which on a phone is memory the tab dies for.
+  const base = { graphOptimizationLevel: backend === 'wasm' ? 'all' as const : 'basic' as const, enableCpuMemArena: false };
   // NHWC measured 2× faster than NCHW on Apple M-series. ponytail: graph capture gains ~18% more, needs GPU-buffer IO.
   if (backend === 'webgpu') return { ...base, executionProviders: [{ name: 'webgpu' as const, preferredLayout: 'NHWC' as const }] };
   if (backend === 'webnn') return { ...base, executionProviders: [{ name: 'webnn' as const, deviceType: 'gpu' as const, powerPreference: 'high-performance' as const }] };

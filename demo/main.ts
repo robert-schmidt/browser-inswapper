@@ -55,6 +55,14 @@ for (const b of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
 /** The engine, created on first use (camera, sample, photo or video); the backend menu recreates it. */
 async function ensureEngine() {
   if (swap) return swap;
+  // On the CPU a phone needs the 550 MB full-precision model, more than a mobile tab is allowed: it would crash
+  // and reload. Say so instead.
+  const caps = await probe();
+  if (matchMedia('(pointer: coarse)').matches && !caps.webgpu.available && !caps.webnn) {
+    status.textContent = 'Can’t run on this browser';
+    log.textContent = 'This browser has no WebGPU, and on the CPU the face swap needs more memory than a phone tab gets. Update to iOS 26 / Safari 26, or use Chrome on Android 12+.';
+    return null;
+  }
   status.textContent = 'Loading models…';
   progress.hidden = false;
   try {

@@ -234,6 +234,7 @@ async function identityFromImage(bitmap: ImageBitmap, lm: Float32Array) {
     if (!arcfaceBytes) throw new Error('The identity model isn’t loaded.');
     arcface = await ort.InferenceSession.create(new Uint8Array(arcfaceBytes), sessionOptions(backend === 'webnn' ? 'webgpu' : backend, caps)).catch(() =>
       ort.InferenceSession.create(new Uint8Array(arcfaceBytes!), sessionOptions('wasm', caps)));
+    arcfaceBytes = null; // the session has its own copy: 166 MB less held for the rest of the visit
   }
   const pts = new Float32Array((lm.length / 3) * 2);
   for (let i = 0; i < pts.length / 2; i++) { pts[i * 2] = lm[i * 3] * bitmap.width; pts[i * 2 + 1] = lm[i * 3 + 1] * bitmap.height; }
