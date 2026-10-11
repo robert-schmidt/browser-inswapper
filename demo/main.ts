@@ -21,6 +21,7 @@ const backendSel = $<HTMLSelectElement>('backend'), videoBackend = $<HTMLSelectE
 type Identity = { image: string; face?: FoundFace } | { views: IdentityView[] } | null;
 let swap: FaceSwap | null = null;
 let input: MediaStreamTrack | null = null;
+let mic: MediaStreamTrack | null = null; // the camera's sound, recorded with the swapped video
 let swapped: MediaStreamTrack | null = null;
 let identity: Identity = null;
 let stats = { fps: 0, inferMs: 0, backend: '', latencyMs: 0 };
@@ -111,11 +112,15 @@ async function sampleTrack() {
 
 $('camera').onclick = async () => {
   try {
-    const s = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+    const video = { width: 1280, height: 720 };
+    // With the microphone for recordings; without it if there's none or it's refused.
+    const s = await navigator.mediaDevices.getUserMedia({ video, audio: true }).catch(() => navigator.mediaDevices.getUserMedia({ video }));
+    mic?.stop(); mic = s.getAudioTracks()[0] ?? null;
     await start(s.getVideoTracks()[0]);
   } catch (err) { log.textContent = `Camera unavailable: ${(err as Error).message}`; }
 };
 $('sample').onclick = async () => {
+  mic?.stop(); mic = null; // the sample has no sound
   const track = await sampleTrack();
   if (!track) { log.textContent = 'This browser can’t capture video from a clip.'; return; }
   await start(track);
@@ -346,10 +351,14 @@ function stopRecording() { if (recorder?.state === 'recording') recorder.stop();
 rec.onclick = () => {
   if (recorder?.state === 'recording') { stopRecording(); return; }
   if (!swapped) return;
-  const type = ['video/mp4;codecs=avc1.640028', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t)) ?? '';
+  const sound = mic?.readyState === 'live' ? mic : null;
+  const types = sound
+    ? ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm']
+    : ['video/mp4;codecs=avc1.640028', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'];
+  const type = types.find((t) => MediaRecorder.isTypeSupported(t)) ?? '';
   const chunks: Blob[] = [];
   const started = performance.now();
-  recorder = new MediaRecorder(new MediaStream([swapped]), { mimeType: type, videoBitsPerSecond: 6_000_000 });
+  recorder = new MediaRecorder(new MediaStream(sound ? [swapped, sound] : [swapped]), { mimeType: type, videoBitsPerSecond: 6_000_000, audioBitsPerSecond: 128_000 });
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   recorder.onstop = () => {
     clearInterval(timer);
