@@ -3,7 +3,7 @@
 // when a video is used. Unlike the camera path, every frame gets a fresh swap for every face (no reuse of older
 // results), so the output is as good as the model gets; it runs slower than real time on most devices.
 
-import { VectorFilter } from './filters.ts';
+import { FaceFilter } from './filters.ts';
 import { FACE_OVAL } from './geometry.ts';
 import type { FaceMask, IdentityView } from './protocol.ts';
 import type { FoundFace } from './index.ts';
@@ -132,7 +132,7 @@ export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideo
   const map = opts.map ? Object.fromEntries(Object.entries(opts.map).map(([k, v]) => [k, v instanceof Float32Array ? [{ embedding: v, yaw: 0 }] : v])) as Record<number, IdentityView[] | null> : null;
   const tracker = await engine.tracker();
   const occlusion = engine.occlusion();
-  type Track = { id: number; cx: number; cy: number; size: number; yaw: number | null; filter: VectorFilter; person: number | null; checkedAt: number };
+  type Track = { id: number; cx: number; cy: number; size: number; yaw: number | null; filter: FaceFilter; person: number | null; checkedAt: number };
   let tracks: Track[] = [], nextTrack = 0, frames = 0, lastTs = -1;
   const canvas = new OffscreenCanvas(2, 2), ctx = canvas.getContext('2d')!;
   try {
@@ -158,7 +158,7 @@ export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideo
           for (const { lm, yaw } of found) {
             const b = bounds(lm, w, h);
             let t = tracks.find((x) => !next.some((n) => n.t === x) && Math.hypot(x.cx - b.cx, x.cy - b.cy) < x.size * 0.6);
-            t ??= { id: nextTrack++, cx: 0, cy: 0, size: 0, yaw: null, filter: new VectorFilter(3.0, 0.02), person: null, checkedAt: -RECHECK_FRAMES };
+            t ??= { id: nextTrack++, cx: 0, cy: 0, size: 0, yaw: null, filter: new FaceFilter(), person: null, checkedAt: -RECHECK_FRAMES };
             Object.assign(t, b);
             t.yaw = t.yaw === null ? yaw : t.yaw + (yaw - t.yaw) * YAW_FOLLOW;
             next.push({ t, lm });

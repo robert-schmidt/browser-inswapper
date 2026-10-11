@@ -23,6 +23,7 @@
     .faces { display: flex; gap: 10px; flex-wrap: wrap; }
     .face { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; font-size: 13px; color: var(--mute); }
     .face img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; }
+    .face .blank { width: 64px; height: 64px; border-radius: 8px; background: var(--line); fill: var(--mute); }
     .face[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
     .slider { display: flex; flex-direction: column; font-size: 13px; color: var(--mute); }
     progress { width: 220px; }
@@ -102,7 +103,7 @@
 
   <div class="row">
     <div class="faces" role="group" aria-label="Swap to">
-      <button class="face" aria-pressed="true" data-face=""><img src="faces/camera.jpg" alt="" />No swap</button>
+      <button class="face" aria-pressed="true" data-face=""><svg class="blank" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="24" r="11" /><path d="M12 56c2-11 10-17 20-17s18 6 20 17z" /></svg>No swap</button>
       <button class="face" aria-pressed="false" data-face="faces/mei.jpg"><img src="faces/mei.jpg" alt="" />Mei</button>
       <button class="face" aria-pressed="false" data-face="faces/kofi.jpg"><img src="faces/kofi.jpg" alt="" />Kofi</button>
     </div>
@@ -122,7 +123,6 @@
   </div>
 
   <div class="row">
-    <label class="slider">Morph time: <output id="morphOut">1.5 s</output><input id="morph" type="range" min="0" max="4000" step="100" value="1500" /></label>
     <label class="slider">Strength: <output id="strengthOut">100%</output><input id="strength" type="range" min="0" max="100" value="100" /></label>
   </div>
   <p id="log" aria-live="polite"></p>

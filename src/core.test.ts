@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { apply, invert, keyPoints, similarity, template, yawOf, type Affine, type Point } from './geometry.ts';
-import { OneEuro } from './filters.ts';
+import { FaceFilter, OneEuro, VectorFilter } from './filters.ts';
 import { blendLatents, cosine, extractEmap, identityLatent, latentAt, normalize } from './onnx-emap.ts';
 
 const close = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
@@ -145,4 +145,26 @@ test('mesh: triangles wind alike; a folded-over side is found and its silhouette
   for (let y = 0; y < H; y++) { assert.equal(f.weights[y * W + 3], 0, 'fold line'); }
   assert.equal(f.weights[1 * W + 2], 0.5, 'one step in');
   assert.equal(f.weights[1 * W + 1], 1, 'further in');
+});
+
+test('face filter: keeps up with a fast moving, tilting head; still face as steady as per-point smoothing', () => {
+  let seed = 3; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const noise = () => (rnd() + rnd() + rnd() - 1.5) * 2; // ~1 px
+  const shape = Array.from({ length: 120 }, () => [(rnd() - 0.5) * 200, (rnd() - 0.5) * 260]);
+  const score = (f: { filter(v: number[], t: number): ArrayLike<number> }) => {
+    let lag = 0, jitter = 0, prev: ArrayLike<number> | null = null;
+    for (let k = 0; k < 60; k++) {
+      const s = k / 30, m = s < 1 ? 0 : s < 1.4 ? s - 1 : 0.4, a = m * 2; // 1000 px/s sideways, ~115°/s tilt
+      const truth = shape.flatMap(([x, y]) => [640 + m * 1000 + x * Math.cos(a) - y * Math.sin(a), 360 + x * Math.sin(a) + y * Math.cos(a)]);
+      const out = f.filter(truth.map((v) => v + noise()), k * 1000 / 30);
+      if (s >= 1) { let d = 0; for (let i = 0; i < out.length; i += 2) d += Math.hypot(out[i] - truth[i], out[i + 1] - truth[i + 1]); lag = Math.max(lag, d / shape.length); }
+      if (s > 0.3 && s < 1 && prev) { let d = 0; for (let i = 0; i < out.length; i++) d += (out[i] - prev[i]) ** 2; jitter += Math.sqrt(d / shape.length); }
+      prev = out;
+    }
+    return { lag, jitter };
+  };
+  const old = score(new VectorFilter(3.0, 0.02)), now = score(new FaceFilter());
+  assert.ok(now.lag < old.lag / 3, `lag ${now.lag.toFixed(1)} px vs ${old.lag.toFixed(1)} px`);
+  assert.ok(now.lag < 4, `lag ${now.lag.toFixed(1)} px`);
+  assert.ok(now.jitter < old.jitter * 1.25, `jitter ${now.jitter.toFixed(2)} vs ${old.jitter.toFixed(2)}`);
 });

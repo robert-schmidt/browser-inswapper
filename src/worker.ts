@@ -8,7 +8,7 @@ import * as ort from 'onnxruntime-web/all';
 import { Compositor } from './compositor.ts';
 import { visibility, type Mesh } from './mesh.ts';
 import { candidates, sessionOptions, type Backend, type Capabilities } from './backend.ts';
-import { VectorFilter } from './filters.ts';
+import { FaceFilter } from './filters.ts';
 import { FACE_OVAL, apply, keyPoints, similarity, template, toCanvas, type Affine } from './geometry.ts';
 import { blendLatents, extractEmap, identityLatent, latentAt, type PoseLatent } from './onnx-emap.ts';
 import type { FaceMask, IdentityView, ToMain, ToWorker } from './protocol.ts';
@@ -34,8 +34,8 @@ let liveYaw = 0; // the live face's head turn, smoothed
 let morphStart = 0, morphMs = 0;
 let strengthFrom = 0, strengthTo = 0, strengthStart = 0, strengthMs = 0;
 
-// Light smoothing on every landmark (pixels): steadies the still face without the lag that makes it slide.
-const smooth = new VectorFilter(3.0, 0.02);
+// Landmark smoothing (pixels): steadies the still face, follows a moving head without trailing it.
+const smooth = new FaceFilter();
 let busy = false;
 const colorShifts = new Map<string, number[]>(); // per face (live: 'live'; video files: per tracked person)
 let compositor: Compositor;

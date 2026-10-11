@@ -16,7 +16,7 @@ const models = {
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const output = $<HTMLVideoElement>('output'), original = $<HTMLVideoElement>('original');
 const status = $('status'), log = $('log'), progress = $<HTMLProgressElement>('progress');
-const backendSel = $<HTMLSelectElement>('backend'), videoBackend = $<HTMLSelectElement>('videoBackend'), morph = $<HTMLInputElement>('morph'), strength = $<HTMLInputElement>('strength');
+const backendSel = $<HTMLSelectElement>('backend'), videoBackend = $<HTMLSelectElement>('videoBackend'), strength = $<HTMLInputElement>('strength');
 
 type Identity = { image: string; face?: FoundFace } | { views: IdentityView[] } | null;
 let swap: FaceSwap | null = null;
@@ -90,7 +90,7 @@ async function start(track: MediaStreamTrack) {
   $<HTMLButtonElement>('rec').disabled = false;
 }
 
-async function choose(next: Identity, ms = Number(morph.value)) {
+async function choose(next: Identity, ms = 0) { // instant: the library can blend between faces (morphMs), the demo doesn't need to
   identity = next;
   if (!swap) return;
   log.textContent = '';
@@ -334,7 +334,6 @@ $<HTMLInputElement>('sideUpload').onchange = async (e) => {
   if (identityKey === t.key) void choose(identityOf(t), 0);
 };
 
-morph.oninput = () => { $('morphOut').textContent = `${(Number(morph.value) / 1000).toFixed(1)} s`; };
 strength.oninput = () => {
   $('strengthOut').textContent = `${strength.value}%`;
   if (identity) swap?.setStrength(Number(strength.value) / 100, 150);
