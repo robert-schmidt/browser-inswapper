@@ -51,6 +51,7 @@ export type VideoEngine = {
 
 const SAME_PERSON = 0.45; // ArcFace cosine between two sightings of one person (different people sit near 0–0.2)
 const RECHECK_FRAMES = 15; // re-confirm who a tracked face is this often
+const STALL_MS = 60_000; // no new frame for this long: something stopped answering
 
 const cosine = (a: Float32Array, b: Float32Array) => {
   let d = 0, na = 0, nb = 0;
@@ -198,7 +199,18 @@ export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideo
     };
     const abort = () => void conversion.cancel();
     opts.signal?.addEventListener('abort', abort, { once: true });
-    try { await conversion.execute(); } finally { opts.signal?.removeEventListener('abort', abort); }
+    // A decoder, encoder or GPU that stops answering would otherwise leave this pending forever (seen at 100%,
+    // while the file is being finished): give up after a minute without a new frame.
+    let lastFrames = -1, quietSince = performance.now(), watchdog = 0;
+    const stalled = new Promise<never>((_, reject) => {
+      watchdog = setInterval(() => {
+        if (frames !== lastFrames) { lastFrames = frames; quietSince = performance.now(); return; }
+        if (performance.now() - quietSince < STALL_MS) return;
+        void conversion.cancel();
+        reject(new Error(`the video stopped making progress after ${frames} frames. Try again, or try another “Run on” choice.`));
+      }, 1000) as unknown as number;
+    });
+    try { await Promise.race([conversion.execute(), stalled]); } finally { clearInterval(watchdog); opts.signal?.removeEventListener('abort', abort); }
     opts.signal?.throwIfAborted();
     return new Blob([(output.target as InstanceType<typeof mb.BufferTarget>).buffer!], { type: 'video/mp4' });
   } finally {

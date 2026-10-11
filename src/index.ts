@@ -169,6 +169,13 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     };
     worker.onerror = (e) => reject(new Error(e.message || 'The face swap worker failed to start.'));
   });
+  // After start: a crashed worker fails what's waiting on it instead of leaving it pending forever.
+  ready.then(() => {
+    worker.onerror = (e) => {
+      for (const settle of pending.values()) settle({ type: 'error', message: `The face swap worker stopped: ${e.message || 'unknown error'}` });
+      pending.clear();
+    };
+  }, () => {});
   send({ type: 'init', swapper: swapBytes, backend: wanted, caps, wasmPaths: opts.ortWasmPaths ?? ORT_CDN, mesh: buildMesh(FaceLandmarker.FACE_LANDMARKS_TESSELATION, FACE_OVAL), masks: segWorker ? masks.port2 : undefined },
     segWorker ? [swapBytes, masks.port2] : [swapBytes]);
   const { backend } = await ready;
@@ -218,7 +225,9 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
           await ready;
           return new Promise<FaceMask | null>((resolve) => {
             let mask: FaceMask | null = null;
-            w.onmessage = (e) => { if (e.data.type === 'mask') mask = e.data.mask; else if (e.data.type === 'done') resolve(mask); };
+            // A segmenter that stops answering (lost GPU context, crashed worker) costs this frame its mask, not the video.
+            const late = setTimeout(() => resolve(null), 5000);
+            w.onmessage = (e) => { if (e.data.type === 'mask') mask = e.data.mask; else if (e.data.type === 'done') { clearTimeout(late); resolve(mask); } };
             w.postMessage({ type: 'frame', bitmap: small, ts, reply: true }, [small]);
           });
         },

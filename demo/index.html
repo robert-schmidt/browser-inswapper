@@ -36,7 +36,9 @@
     dialog { max-width: min(560px, calc(100vw - 32px)); width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 16px; padding: 20px; }
     dialog::backdrop { background: #000b; }
     dialog h2 { margin: 0 0 12px; font-size: 1.1rem; }
-    .photo-wrap { position: relative; line-height: 0; }
+    .photo-wrap { position: relative; line-height: 0; cursor: crosshair; touch-action: none; user-select: none; }
+    .photo-wrap img { pointer-events: none; }
+    .photo-box.drawing { border: 2px dashed var(--accent); pointer-events: none; }
     .photo-wrap img { width: 100%; max-height: 50vh; object-fit: contain; border-radius: 10px; background: #000; }
     .photo-box { position: absolute; padding: 0; border: 2px solid #fff8; border-radius: 8px; background: transparent; }
     .photo-box[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px #5fd0ff55; }
@@ -123,6 +125,7 @@
     <h2 id="photoTitle">Use this face?</h2>
     <p id="photoPick" hidden>There's more than one face in this photo. Choose the one to use.</p>
     <div class="photo-wrap"><img id="photoImg" alt="Your photo" /><div id="photoBoxes"></div></div>
+    <p id="photoHint" class="note" aria-live="polite"></p>
     <div class="chosen" id="photoChosen"><canvas id="photoFace" width="160" height="160" aria-label="The face that will be used"></canvas><ul id="photoIssues"></ul></div>
     <div class="row end">
       <button id="photoCancel">Cancel</button>
@@ -159,6 +162,7 @@
 
     <div class="row">
       <button id="videoGo" class="primary" disabled>Swap faces in this video</button>
+      <select id="videoBackend" aria-label="Run on"></select>
       <button id="videoCancel" hidden>Cancel</button>
       <progress id="videoProgress" max="1" hidden></progress>
       <span id="videoStatus" class="note" aria-live="polite"></span>

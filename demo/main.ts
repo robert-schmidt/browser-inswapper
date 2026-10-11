@@ -16,7 +16,7 @@ const models = {
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const output = $<HTMLVideoElement>('output'), original = $<HTMLVideoElement>('original');
 const status = $('status'), log = $('log'), progress = $<HTMLProgressElement>('progress');
-const backendSel = $<HTMLSelectElement>('backend'), morph = $<HTMLInputElement>('morph'), strength = $<HTMLInputElement>('strength');
+const backendSel = $<HTMLSelectElement>('backend'), videoBackend = $<HTMLSelectElement>('videoBackend'), morph = $<HTMLInputElement>('morph'), strength = $<HTMLInputElement>('strength');
 
 type Identity = { image: string; face?: FoundFace } | null;
 let swap: FaceSwap | null = null;
@@ -36,6 +36,9 @@ void probe().then((caps) => {
     const why = off[o.value];
     if (why) { o.disabled = true; o.textContent = `${o.dataset.label}: ${why}`; }
   }
+  // The video section has its own copy of the menu: one engine, so both always show the same choice.
+  videoBackend.replaceChildren(...[...backendSel.options].map((o) => o.cloneNode(true)));
+  videoBackend.value = backendSel.value; videoBackend.title = backendSel.title;
   if (!caps.webnn) backendSel.title = 'Neural engine: in Chrome or Edge, turn on chrome://flags/#web-machine-learning-neural-network and relaunch.';
   // Macs gain the most (Core ML): show how to switch it on.
   $('webnnTip').hidden = caps.webnn || !/Mac/i.test(navigator.platform || navigator.userAgent);
@@ -117,7 +120,9 @@ $('sample').onclick = async () => {
   if (!track) { log.textContent = 'This browser can’t capture video from a clip.'; return; }
   await start(track);
 };
+videoBackend.onchange = () => { backendSel.value = videoBackend.value; void backendSel.onchange!(new Event('change')); };
 backendSel.onchange = async () => {
+  videoBackend.value = backendSel.value;
   swap?.dispose(); swap = null; swapped?.stop();
   if (input) await start(input.clone()); else await ensureEngine();
 };
@@ -141,24 +146,42 @@ $<HTMLInputElement>('upload').onchange = async (e) => {
   const el = e.target as HTMLInputElement, file = el.files?.[0];
   el.value = '';
   if (!file) return;
-  const url = URL.createObjectURL(file);
   log.textContent = 'Looking for faces…';
-  let found: FoundFace[];
-  try { found = await (await ensureEngine())!.findFaces(url); } catch (err) { log.textContent = (err as Error).message; return; }
+  let url: string, found: FoundFace[];
+  try {
+    url = await upright(file);
+    found = await (await ensureEngine())!.findFaces(url);
+  } catch (err) { log.textContent = (err as Error).message; return; }
   log.textContent = '';
   showPhoto(url, found);
 };
 
+/** The photo exactly as the page shows it (rotation applied), so detection, boxes and the swap all see the same pixels. */
+async function upright(source: Blob | ImageBitmap, region?: { x: number; y: number; width: number; height: number }) {
+  const bmp = source instanceof Blob ? await createImageBitmap(source, { imageOrientation: 'from-image' }) : source;
+  const r = region ?? { x: 0, y: 0, width: bmp.width, height: bmp.height };
+  const c = new OffscreenCanvas(Math.round(r.width), Math.round(r.height));
+  c.getContext('2d')!.drawImage(bmp, r.x, r.y, r.width, r.height, 0, 0, c.width, c.height);
+  if (source instanceof Blob) bmp.close();
+  return URL.createObjectURL(await c.convertToBlob({ type: 'image/jpeg', quality: 0.95 }));
+}
+
 function showPhoto(url: string, found: FoundFace[]) {
   const img = $<HTMLImageElement>('photoImg'), boxes = $('photoBoxes'), issues = $('photoIssues'), use = $<HTMLButtonElement>('photoUse');
-  const preview = $<HTMLCanvasElement>('photoFace');
+  const preview = $<HTMLCanvasElement>('photoFace'), wrap = img.parentElement!;
+  // Each face remembers which picture its landmarks belong to: the photo, or a crop the person drew.
+  const sources = new Map<FoundFace, string>(found.map((f) => [f, url]));
   let picked = found[0];
+  const detected = found.length;
   img.src = url;
   boxes.replaceChildren();
-  $('photoTitle').textContent = found.length ? 'Use this face?' : 'No face found';
-  $('photoPick').hidden = found.length < 2;
-  $('photoChosen').hidden = !found.length;
-  use.hidden = !found.length;
+  const titles = () => {
+    $('photoTitle').textContent = found.length ? 'Use this face?' : 'No face found';
+    $('photoPick').hidden = detected < 2;
+    $('photoChosen').hidden = !found.length;
+    use.hidden = !found.length;
+  };
+  titles();
   const show = (f: FoundFace) => {
     picked = f;
     preview.getContext('2d')!.drawImage(f.preview, 0, 0, 160, 160);
@@ -167,10 +190,13 @@ function showPhoto(url: string, found: FoundFace[]) {
       : [Object.assign(document.createElement('li'), { className: 'ok', textContent: 'Good photo: clear, sharp and facing the camera.' })]));
     boxes.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String(found[i] === f)));
   };
-  const place = () => {
-    // The image is letterboxed (object-fit: contain): position the face boxes on what's actually shown.
+  // The image is letterboxed (object-fit: contain): map between photo pixels and what's actually shown.
+  const fit = () => {
     const k = Math.min(img.clientWidth / img.naturalWidth, img.clientHeight / img.naturalHeight);
-    const dx = (img.clientWidth - img.naturalWidth * k) / 2, dy = (img.clientHeight - img.naturalHeight * k) / 2;
+    return { k, dx: (img.clientWidth - img.naturalWidth * k) / 2, dy: (img.clientHeight - img.naturalHeight * k) / 2 };
+  };
+  const place = () => {
+    const { k, dx, dy } = fit();
     boxes.replaceChildren(...found.map((f, i) => {
       const b = Object.assign(document.createElement('button'), { className: 'photo-box', onclick: () => show(f) });
       b.setAttribute('aria-label', `Face ${i + 1}`);
@@ -180,6 +206,47 @@ function showPhoto(url: string, found: FoundFace[]) {
     if (found.length) show(picked);
   };
   img.onload = place;
+  // Wrong face, or none found: drag a box around the right one and it's looked for in just that area.
+  const hint = $('photoHint');
+  hint.textContent = 'Wrong face, or none found? Drag a box around the face on the photo.';
+  wrap.onpointerdown = (e) => {
+    if (e.button !== 0) return;
+    const r = wrap.getBoundingClientRect(), x0 = e.clientX - r.left, y0 = e.clientY - r.top;
+    const draw = Object.assign(document.createElement('div'), { className: 'photo-box drawing' });
+    let moved = false;
+    wrap.onpointermove = (m) => {
+      const x1 = m.clientX - r.left, y1 = m.clientY - r.top;
+      if (!moved && Math.hypot(x1 - x0, y1 - y0) < 8) return; // a click selects a box instead
+      if (!moved) { moved = true; boxes.append(draw); wrap.setPointerCapture(e.pointerId); }
+      Object.assign(draw.style, { left: `${Math.min(x0, x1)}px`, top: `${Math.min(y0, y1)}px`, width: `${Math.abs(x1 - x0)}px`, height: `${Math.abs(y1 - y0)}px` });
+    };
+    wrap.onpointerup = async () => {
+      wrap.onpointermove = wrap.onpointerup = null;
+      if (!moved) return;
+      const { k, dx, dy } = fit();
+      const b = draw.getBoundingClientRect();
+      // A square around the box with some margin: the detector wants the whole head and a bit around it.
+      const cx = (b.left + b.width / 2 - r.left - dx) / k, cy = (b.top + b.height / 2 - r.top - dy) / k;
+      const side = (1.4 * Math.max(b.width, b.height)) / k;
+      const region = { x: cx - side / 2, y: cy - side / 2, width: side, height: side };
+      draw.remove();
+      if (side < 24) return;
+      hint.textContent = 'Looking for a face there…';
+      try {
+        const crop = await upright(await createImageBitmap(img), region);
+        const [f] = await swap!.findFaces(crop);
+        if (!f) { URL.revokeObjectURL(crop); hint.textContent = 'No face in that area. Try a slightly bigger box around the whole head.'; return; }
+        const s = side / Math.round(side); // the crop was rounded to whole pixels
+        const face = { ...f, box: { x: region.x + f.box.x * s, y: region.y + f.box.y * s, width: f.box.width * s, height: f.box.height * s } };
+        found.push(face);
+        sources.set(face, crop);
+        picked = face;
+        titles();
+        place();
+        hint.textContent = 'Found it. Drag again to try another area.';
+      } catch (err) { hint.textContent = (err as Error).message; }
+    };
+  };
   if (!found.length) issues.replaceChildren();
   $('photoCancel').onclick = () => dialog.close();
   use.onclick = () => {
@@ -190,9 +257,10 @@ function showPhoto(url: string, found: FoundFace[]) {
     thumb.getContext('2d')!.drawImage(picked.preview, 0, 0, 64, 64);
     thumb.style.cssText = 'width:64px;height:64px;border-radius:8px';
     chip.append(thumb, 'Your photo');
-    const id: Identity = { image: url, face: picked };
+    const image = sources.get(picked)!;
+    const id: Identity = { image, face: picked };
     const key = `photo-${targets.length}`;
-    targets.push({ key, label: `Your photo ${targets.filter((t) => t.key.startsWith('photo-')).length + 1}`, image: url, face: picked, thumb });
+    targets.push({ key, label: `Your photo ${targets.filter((t) => t.key.startsWith('photo-')).length + 1}`, image, face: picked, thumb });
     chip.onclick = () => { select(chip); identityKey = key; void choose(id); };
     faces.append(chip);
     select(chip);
@@ -356,6 +424,11 @@ vGo.onclick = async () => {
   if (!video?.scan || !swap) return;
   videoAbort = new AbortController();
   vGo.disabled = true; $('videoCancel').hidden = false; vProgress.hidden = false; vProgress.value = 0;
+  // One engine for both: pause the live preview so the video gets all of it (and it isn't slowed down).
+  const resume = input?.readyState === 'live' && swapped ? input.clone() : null;
+  stopRecording(); swapped?.stop(); swapped = null;
+  if (resume) status.textContent = 'Paused while the video is processed';
+  for (const el of [backendSel, videoBackend, rec, $<HTMLButtonElement>('camera'), $<HTMLButtonElement>('sample')]) el.disabled = true;
   vResult.hidden = true; vDownload.hidden = true;
   vStatus.textContent = 'Preparing the faces…';
   try {
@@ -374,7 +447,8 @@ vGo.onclick = async () => {
       signal: videoAbort.signal,
       onProgress: ({ progress: p, etaSeconds }) => {
         vProgress.value = p;
-        vStatus.textContent = `${Math.round(p * 100)}%${etaSeconds !== null ? `, about ${fmtTime(etaSeconds)} left` : ''}`;
+        // Every frame has been read at 100%; the last ones are still being swapped and the file written.
+        vStatus.textContent = p >= 0.999 ? 'Finishing the file…' : `${Math.round(p * 100)}%${etaSeconds !== null ? `, about ${fmtTime(etaSeconds)} left` : ''}`;
       },
     });
     if (vDownload.href) URL.revokeObjectURL(vDownload.href);
@@ -389,6 +463,8 @@ vGo.onclick = async () => {
     vStatus.textContent = videoAbort.signal.aborted ? 'Canceled.' : `Couldn’t finish: ${(err as Error).message}`;
   } finally {
     updateGo(); $('videoCancel').hidden = true; vProgress.hidden = true; videoAbort = null;
+    for (const el of [backendSel, videoBackend, $<HTMLButtonElement>('camera'), $<HTMLButtonElement>('sample')]) el.disabled = false;
+    if (resume) await start(resume);
   }
 };
 $('videoCancel').onclick = () => videoAbort?.abort();
