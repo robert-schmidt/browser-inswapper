@@ -5,7 +5,7 @@
 
 import { VectorFilter } from './filters.ts';
 import { FACE_OVAL } from './geometry.ts';
-import type { FaceMask } from './protocol.ts';
+import type { FaceMask, IdentityView } from './protocol.ts';
 import type { FoundFace } from './index.ts';
 
 /** A person seen in a clip by `scanVideo`. */
@@ -27,11 +27,12 @@ export type SwapVideoOptions = VideoRange & {
   /** People from `scanVideo` (needed for `map`: faces are recognised against them on every frame). */
   people?: VideoPerson[];
   /**
-   * Who becomes whom: person id → identity embedding (from `identityOf` or `setIdentity`), or null to keep them as
-   * they are. People left out, and faces matching no one, stay as they are. Leave `map` out to give every face the
-   * current identity.
+   * Who becomes whom: person id → identity embedding (from `identityOf` or `setIdentity`), photos of one person at
+   * several head turns (`identityView` each: side-on faces get the matching one), or null to keep them as they are.
+   * People left out, and faces matching no one, stay as they are. Leave `map` out to give every face the current
+   * identity.
    */
-  map?: Record<number, Float32Array | null>;
+  map?: Record<number, Float32Array | IdentityView[] | null>;
   onProgress?: (p: VideoProgress) => void;
   signal?: AbortSignal;
 };
@@ -42,16 +43,18 @@ export type VideoEngine = {
   /** Identity embeddings for faces (landmarks normalised to `image`). Takes ownership of `image`. */
   embed(image: ImageBitmap, faces: Float32Array[]): Promise<Float32Array[]>;
   /** A multi-face tracker for one pass over a clip. */
-  tracker(): Promise<{ detect(frame: VideoFrame, ts: number): Float32Array[]; close(): void }>;
+  /** A multi-face tracker for one pass over a clip: each face's landmarks and head turn (degrees). */
+  tracker(): Promise<{ detect(frame: VideoFrame, ts: number): { lm: Float32Array; yaw: number }[]; close(): void }>;
   /** Hand and object masks for one pass, or null when occlusion is off. Takes ownership of each small bitmap. */
   occlusion(): { mask(small: ImageBitmap, ts: number): Promise<FaceMask | null>; close(): void } | null;
-  /** The frame with each face swapped (points: pixel x/y pairs; identity: that face's target). Takes ownership of `frame`. */
-  still(frame: ImageBitmap, faces: { key: string; points: Float32Array; identity?: Float32Array }[], mask: FaceMask | null): Promise<ImageBitmap>;
+  /** The frame with each face swapped (points: pixel x/y pairs; yaw: head turn; identity: that face's target). Takes ownership of `frame`. */
+  still(frame: ImageBitmap, faces: { key: string; points: Float32Array; yaw: number; identity?: IdentityView[] }[], mask: FaceMask | null): Promise<ImageBitmap>;
 };
 
 const SAME_PERSON = 0.45; // ArcFace cosine between two sightings of one person (different people sit near 0–0.2)
 const RECHECK_FRAMES = 15; // re-confirm who a tracked face is this often
-const STALL_MS = 60_000; // no new frame for this long: something stopped answering
+const STALL_MS = 60_000;
+const YAW_FOLLOW = 0.3; // how quickly a tracked face's identity follows its head turn (per frame) // no new frame for this long: something stopped answering
 
 const cosine = (a: Float32Array, b: Float32Array) => {
   let d = 0, na = 0, nb = 0;
@@ -125,10 +128,11 @@ export async function scanVideo(engine: VideoEngine, file: Blob, opts: VideoRang
 export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideoOptions = {}): Promise<Blob> {
   const { mb, input, track } = await open(file);
   const people = opts.people ?? [];
-  const map = opts.map ?? null;
+  // Every target as photos-by-angle: a single embedding is one photo facing the camera.
+  const map = opts.map ? Object.fromEntries(Object.entries(opts.map).map(([k, v]) => [k, v instanceof Float32Array ? [{ embedding: v, yaw: 0 }] : v])) as Record<number, IdentityView[] | null> : null;
   const tracker = await engine.tracker();
   const occlusion = engine.occlusion();
-  type Track = { id: number; cx: number; cy: number; size: number; filter: VectorFilter; person: number | null; checkedAt: number };
+  type Track = { id: number; cx: number; cy: number; size: number; yaw: number | null; filter: VectorFilter; person: number | null; checkedAt: number };
   let tracks: Track[] = [], nextTrack = 0, frames = 0, lastTs = -1;
   const canvas = new OffscreenCanvas(2, 2), ctx = canvas.getContext('2d')!;
   try {
@@ -144,18 +148,19 @@ export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideo
           const ts = Math.max(lastTs + 1, Math.round(sample.timestamp * 1000)); lastTs = ts;
           const frame = sample.toVideoFrame();
           const w = frame.displayWidth, h = frame.displayHeight;
-          let found: Float32Array[] = [];
+          let found: { lm: Float32Array; yaw: number }[] = [];
           try { found = tracker.detect(frame, ts); } catch { /* no faces this frame */ }
           const bitmap = await createImageBitmap(frame);
           frame.close();
 
           // Follow each face from frame to frame (nearest centre), so smoothing and identity carry over.
           const next: { t: Track; lm: Float32Array }[] = [];
-          for (const lm of found) {
+          for (const { lm, yaw } of found) {
             const b = bounds(lm, w, h);
             let t = tracks.find((x) => !next.some((n) => n.t === x) && Math.hypot(x.cx - b.cx, x.cy - b.cy) < x.size * 0.6);
-            t ??= { id: nextTrack++, cx: 0, cy: 0, size: 0, filter: new VectorFilter(3.0, 0.02), person: null, checkedAt: -RECHECK_FRAMES };
+            t ??= { id: nextTrack++, cx: 0, cy: 0, size: 0, yaw: null, filter: new VectorFilter(3.0, 0.02), person: null, checkedAt: -RECHECK_FRAMES };
             Object.assign(t, b);
+            t.yaw = t.yaw === null ? yaw : t.yaw + (yaw - t.yaw) * YAW_FOLLOW;
             next.push({ t, lm });
           }
           tracks = next.map((n) => n.t);
@@ -176,7 +181,8 @@ export async function swapVideo(engine: VideoEngine, file: Blob, opts: SwapVideo
           const faces = next.filter(({ t }) => target(t) !== null).map(({ t, lm }) => {
             const raw = new Array<number>((lm.length / 3) * 2);
             for (let i = 0; i < raw.length / 2; i++) { raw[i * 2] = lm[i * 3] * w; raw[i * 2 + 1] = lm[i * 3 + 1] * h; }
-            return { key: `video-${t.id}`, points: Float32Array.from(t.filter.filter(raw, ts)), identity: target(t)?.slice() };
+            const identity = target(t)?.map((v) => ({ embedding: v.embedding.slice(), yaw: v.yaw }));
+            return { key: `video-${t.id}`, points: Float32Array.from(t.filter.filter(raw, ts)), yaw: t.yaw!, identity };
           });
           const mask = occlusion && faces.length
             ? await occlusion.mask(await createImageBitmap(bitmap, { resizeWidth: 256, resizeHeight: Math.max(16, Math.round((256 * h) / w)), resizeQuality: 'low' }), ts)

@@ -63,3 +63,14 @@ export function keyPoints(lm: ArrayLike<number>, width: number, height: number, 
 
 /** MediaPipe's face-oval contour, in order (for the paste-back mask). */
 export const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
+
+/**
+ * Head turn in degrees from MediaPipe's facial transformation matrix (4×4, column-major: the canonical face model
+ * fitted to the landmarks): 0 facing the camera, positive with the nose towards the image's right. A tilted or
+ * nodding head doesn't change it. (Measured on the landmarks' own depth instead, small turns read about a
+ * third of this and noisier.)
+ */
+export function yawOf(matrix: ArrayLike<number>): number {
+  // The head's left-right axis (first column) leaves the image plane by sin(yaw), whatever the tilt or nod.
+  return (Math.asin(Math.max(-1, Math.min(1, -matrix[2]))) * 180) / Math.PI;
+}

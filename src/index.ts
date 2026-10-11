@@ -11,9 +11,9 @@ import { probe, rememberedBackend, rememberBackend, swapperPrecision, type Backe
 import { DEFAULT_LANDMARKER, DEFAULT_SEGMENTER, loadModel, type ModelSet, type ModelSpec, type Progress } from './models.ts';
 import type { ToMain, ToWorker } from './protocol.ts';
 import { buildMesh } from './mesh.ts';
-import { FACE_OVAL, keyPoints, similarity, template, toCanvas } from './geometry.ts';
+import { FACE_OVAL, keyPoints, similarity, template, toCanvas, yawOf } from './geometry.ts';
 import { faceIssues, type FaceIssue } from './faces.ts';
-import type { FaceMask } from './protocol.ts';
+import type { FaceMask, IdentityView } from './protocol.ts';
 import type { SwapVideoOptions, VideoEngine, VideoInfo, VideoRange, VideoScan } from './video.ts';
 
 export type { Backend, Capabilities } from './backend.ts';
@@ -21,6 +21,7 @@ export type { ModelSet, ModelSpec, Progress } from './models.ts';
 export { KNOWN_SHA256, clearModelCache } from './models.ts';
 export { probe } from './backend.ts';
 export { ISSUE_TEXT, type FaceIssue } from './faces.ts';
+export type { IdentityView } from './protocol.ts';
 export type { SwapVideoOptions, VideoInfo, VideoPerson, VideoProgress, VideoRange, VideoScan } from './video.ts';
 
 export type FaceSwapOptions = {
@@ -48,7 +49,11 @@ export type FaceSwapOptions = {
 
 /** `latencyMs`: from a camera frame arriving to its swapped copy leaving (tracking + compositing), averaged. */
 export type Stats = { fps: number; inferMs: number; backend: Backend; latencyMs: number };
-export type IdentitySource = { embedding: Float32Array } | { image: ImageBitmapSource | string; face?: FoundFace };
+/**
+ * Who to swap to: a photo (`face` from findFaces picks one of several), a stored `embedding`, or `views`: the same
+ * person photographed at several head turns (from `identityView`), so faces turned to the side use the matching photo.
+ */
+export type IdentitySource = { embedding: Float32Array } | { image: ImageBitmapSource | string; face?: FoundFace } | { views: IdentityView[] };
 
 /** A face found in a photo by `findFaces`. */
 export type FoundFace = {
@@ -56,6 +61,8 @@ export type FoundFace = {
   box: { x: number; y: number; width: number; height: number };
   /** Its 478 landmarks, normalised to the photo (x, y, z). */
   landmarks: Float32Array;
+  /** How far the head is turned, in degrees: 0 facing the camera, positive with the nose towards the photo's right. */
+  yaw: number;
   /** What would make the swapped face less accurate (see ISSUE_TEXT); empty for a good photo. */
   issues: FaceIssue[];
   /** The face cropped square, 160 px, for a picker. */
@@ -65,7 +72,7 @@ export type FoundFace = {
 export type FaceSwap = {
   readonly backend: Backend;
   readonly capabilities: Capabilities;
-  /** Swap to a face. Returns its 512-d identity embedding: store it to skip the identity model next time. */
+  /** Swap to a face. Returns its 512-d identity embedding (with `views`, the most frontal one's): store it to skip the identity model next time. */
   setIdentity(source: IdentitySource, opts?: { morphMs?: number }): Promise<Float32Array>;
   /** Every face in a photo, biggest first, with quality notes and a preview: pass one to setIdentity({ image, face }). */
   findFaces(image: ImageBitmapSource | string): Promise<FoundFace[]>;
@@ -75,6 +82,12 @@ export type FaceSwap = {
   scanVideo(file: Blob, opts?: VideoRange & { samples?: number; signal?: AbortSignal }): Promise<VideoScan>;
   /** A face's identity (512 numbers) without switching to it: for `swapVideo`'s `map`, or to store. */
   identityOf(source: { image: ImageBitmapSource | string; face?: FoundFace }): Promise<Float32Array>;
+  /**
+   * A face's identity plus the head turn it was photographed at. Several of one person (facing the camera, turned
+   * left, turned right) passed as `{ views }` to setIdentity or swapVideo's `map` give side-on faces the identity
+   * measured from the side. Storable like an embedding.
+   */
+  identityView(source: { image: ImageBitmapSource | string; face?: FoundFace }): Promise<IdentityView>;
   /** Video files: an MP4 with faces swapped to the current identity on every frame (audio kept). Slower than real time. */
   swapVideo(file: Blob, opts?: SwapVideoOptions): Promise<Blob>;
   /** Fade the swap in (1) or out (0) without losing the identity. */
@@ -108,8 +121,8 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   const vision = await FilesetResolver.forVisionTasks(opts.mediapipeWasm ?? MP_CDN);
   const makeLandmarker = (mode: 'VIDEO' | 'IMAGE', numFaces = 1, delegate: 'CPU' | 'GPU' = 'GPU') => FaceLandmarker.createFromOptions(vision, {
     baseOptions: { modelAssetBuffer: new Uint8Array(landmarkerBytes), delegate },
-    runningMode: mode, numFaces, minFaceDetectionConfidence: 0.5, minTrackingConfidence: 0.5,
-  }).catch(() => FaceLandmarker.createFromOptions(vision, { baseOptions: { modelAssetBuffer: new Uint8Array(landmarkerBytes), delegate: 'CPU' }, runningMode: mode, numFaces }));
+    runningMode: mode, numFaces, minFaceDetectionConfidence: 0.5, minTrackingConfidence: 0.5, outputFacialTransformationMatrixes: true,
+  }).catch(() => FaceLandmarker.createFromOptions(vision, { baseOptions: { modelAssetBuffer: new Uint8Array(landmarkerBytes), delegate: 'CPU' }, runningMode: mode, numFaces, outputFacialTransformationMatrixes: true }));
   const landmarker = await makeLandmarker('VIDEO', 1, opts.tracking ?? 'GPU');
   let imageLandmarker: FaceLandmarker | null = null;
   let groupLandmarker: FaceLandmarker | null = null;
@@ -182,13 +195,17 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   if (wanted === 'auto') rememberBackend(backend); // a forced choice isn't a benchmark result
 
   let arcfaceSent = false;
-  const landmarksOf = (result: { faceLandmarks: { x: number; y: number; z: number }[][] }) => {
+  type Detection = { faceLandmarks: { x: number; y: number; z: number }[][]; facialTransformationMatrixes?: { data: ArrayLike<number> }[] };
+  const landmarksOf = (result: Detection) => {
     const face = result.faceLandmarks[0];
     if (!face) return null;
     const a = new Float32Array(face.length * 3);
     face.forEach((p, i) => { a[i * 3] = p.x; a[i * 3 + 1] = p.y; a[i * 3 + 2] = p.z; });
     return a;
   };
+  const yawAt = (result: Detection, i = 0) => { const m = result.facialTransformationMatrixes?.[i]; return m ? yawOf(m.data) : 0; };
+  /** Every face in a detection: landmarks and head turn. */
+  const facesOf = (result: Detection) => result.faceLandmarks.map((f, i) => ({ lm: Float32Array.from(f.flatMap((p) => [p.x, p.y, p.z])), yaw: yawAt(result, i) }));
   const toBitmap = async (image: ImageBitmapSource | string) =>
     typeof image === 'string' ? createImageBitmap(await (await fetch(image)).blob()) : createImageBitmap(image);
   const boxOf = (lm: Float32Array, W: number, H: number) => {
@@ -211,7 +228,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     async tracker() {
       const t = await makeLandmarker('VIDEO', 6);
       return {
-        detect: (frame, ts) => t.detectForVideo(frame as unknown as HTMLVideoElement, ts).faceLandmarks.map((f) => Float32Array.from(f.flatMap((p) => [p.x, p.y, p.z]))),
+        detect: (frame, ts) => facesOf(t.detectForVideo(frame as unknown as HTMLVideoElement, ts)),
         close: () => t.close(),
       };
     },
@@ -236,7 +253,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     },
     async still(frame, faces, mask) {
       const m = await request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'still', id, frame, faces, mask }),
-        [frame, ...faces.flatMap((f) => (f.identity ? [f.points.buffer, f.identity.buffer] : [f.points.buffer])), ...(mask ? [mask.data.buffer] : [])]);
+        [frame, ...faces.flatMap((f) => [f.points.buffer, ...(f.identity ?? []).map((v) => v.embedding.buffer)]), ...(mask ? [mask.data.buffer] : [])]);
       return m.frame as ImageBitmap;
     },
   };
@@ -249,8 +266,9 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
 
     async setIdentity(source, o = {}) {
       const morphMs = o.morphMs ?? 0;
-      if ('embedding' in source) {
-        const m = await request<Extract<ToMain, { type: 'identity' }>>((id) => ({ type: 'identity', id, embedding: source.embedding.slice(), morphMs }));
+      if ('embedding' in source || 'views' in source) {
+        const views = 'views' in source ? source.views.map((v) => ({ embedding: v.embedding.slice(), yaw: v.yaw })) : undefined;
+        const m = await request<Extract<ToMain, { type: 'identity' }>>((id) => ({ type: 'identity', id, views, embedding: 'embedding' in source ? source.embedding.slice() : undefined, morphMs }));
         return m.embedding;
       }
       if (!arcfaceSent) {
@@ -273,7 +291,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
         groupLandmarker ??= await makeLandmarker('IMAGE', 6);
         imageLandmarker ??= await makeLandmarker('IMAGE');
         const W = bitmap.width, H = bitmap.height;
-        const all = (src: ImageBitmap) => groupLandmarker!.detect(src).faceLandmarks.map((f) => Float32Array.from(f.flatMap((p) => [p.x, p.y, p.z])));
+        const all = (src: ImageBitmap) => facesOf(groupLandmarker!.detect(src));
         let found = all(bitmap);
         if (!found.length) {
           // Small faces (group or full-body shots): the detector needs a face to fill about a fifth of the
@@ -284,23 +302,24 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
               const sx = tx * step * W, sy = ty * step * H, sw = size * W, sh = size * H;
               const tile = await createImageBitmap(bitmap, sx, sy, sw, sh);
               for (const f of all(tile)) {
-                for (let i = 0; i < f.length; i += 3) { f[i] = (sx + f[i] * sw) / W; f[i + 1] = (sy + f[i + 1] * sh) / H; }
+                for (let i = 0; i < f.lm.length; i += 3) { f.lm[i] = (sx + f.lm[i] * sw) / W; f.lm[i + 1] = (sy + f.lm[i + 1] * sh) / H; }
                 found.push(f);
               }
               tile.close();
             }
           }
-          found = found.filter((f, i) => !found.slice(0, i).some((g) => { const a = boxOf(f, W, H), b = boxOf(g, W, H); return Math.abs(a.x + a.width / 2 - b.x - b.width / 2) < b.width / 2 && Math.abs(a.y + a.height / 2 - b.y - b.height / 2) < b.height / 2; }));
+          found = found.filter((f, i) => !found.slice(0, i).some((g) => { const a = boxOf(f.lm, W, H), b = boxOf(g.lm, W, H); return Math.abs(a.x + a.width / 2 - b.x - b.width / 2) < b.width / 2 && Math.abs(a.y + a.height / 2 - b.y - b.height / 2) < b.height / 2; }));
         }
         const faces: FoundFace[] = [];
         for (const coarse of found) {
           // Refine on a close crop: the tracker is much more precise when the face fills the picture.
-          const b0 = boxOf(coarse, W, H), side = 2 * Math.max(b0.width, b0.height);
+          const b0 = boxOf(coarse.lm, W, H), side = 2 * Math.max(b0.width, b0.height);
           const sx = b0.x + b0.width / 2 - side / 2, sy = b0.y + b0.height / 2 - side / 2;
           const crop = await createImageBitmap(bitmap, sx, sy, side, side, { resizeWidth: 512, resizeHeight: 512 });
-          const fine = imageLandmarker.detect(crop).faceLandmarks[0];
+          const close = imageLandmarker.detect(crop), fine = close.faceLandmarks[0];
           crop.close();
-          const lm = fine ? Float32Array.from(fine.flatMap((p) => [(sx + p.x * side) / W, (sy + p.y * side) / H, p.z])) : coarse;
+          const lm = fine ? Float32Array.from(fine.flatMap((p) => [(sx + p.x * side) / W, (sy + p.y * side) / H, p.z])) : coarse.lm;
+          const yaw = fine ? yawAt(close) : coarse.yaw;
           const box = boxOf(lm, W, H);
           const pts = new Float32Array((lm.length / 3) * 2);
           for (let i = 0; i < pts.length / 2; i++) { pts[i * 2] = lm[i * 3] * W; pts[i * 2 + 1] = lm[i * 3 + 1] * H; }
@@ -311,19 +330,23 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
           for (let i = 0; i < gray.length; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
           const ps = 1.5 * Math.max(box.width, box.height);
           const preview = await createImageBitmap(bitmap, box.x + box.width / 2 - ps / 2, box.y + box.height / 2 - ps / 2, ps, ps, { resizeWidth: 160, resizeHeight: 160, resizeQuality: 'high' });
-          faces.push({ box, landmarks: lm, issues: faceIssues(pts, gray, 112), preview });
+          faces.push({ box, landmarks: lm, yaw, issues: faceIssues(pts, gray, 112), preview });
         }
         return faces.sort((a, b) => b.box.width - a.box.width);
       } finally { bitmap.close(); }
     },
 
-    async identityOf(source) {
+    identityOf: async (source) => (await api.identityView(source)).embedding,
+
+    async identityView(source) {
       const bitmap = await toBitmap(source.image);
       imageLandmarker ??= await makeLandmarker('IMAGE');
-      const lm = source.face?.landmarks.slice() ?? landmarksOf(imageLandmarker.detect(bitmap));
+      const detected = source.face ? null : imageLandmarker.detect(bitmap);
+      const lm = source.face?.landmarks.slice() ?? landmarksOf(detected!);
       if (!lm) { bitmap.close(); throw new Error('No face found in that picture.'); }
-      const [e] = await videoEngine.embed(bitmap, [lm]);
-      return e;
+      const yaw = source.face?.yaw ?? yawAt(detected!);
+      const [embedding] = await videoEngine.embed(bitmap, [lm]);
+      return { embedding, yaw };
     },
 
     videoInfo: async (file) => (await import('./video.ts')).videoInfo(file),
@@ -334,11 +357,11 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
 
     async processFrame(source, timestampMs = performance.now()) {
       const ts = monotonic(timestampMs);
-      const lm = landmarksOf(landmarker.detectForVideo(source as HTMLVideoElement, ts));
+      const result = landmarker.detectForVideo(source as HTMLVideoElement, ts), lm = landmarksOf(result), yaw = yawAt(result);
       const [sw, sh] = sizeOf(source);
       if (lm) segment(source, sw, sh, ts);
       const frame = typeof VideoFrame !== 'undefined' && source instanceof VideoFrame ? source : await createImageBitmap(source as ImageBitmapSource);
-      const m = await request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'frame', id, frame, landmarks: lm, ts }), [frame as Transferable]);
+      const m = await request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'frame', id, frame, landmarks: lm, yaw, ts }), [frame as Transferable]);
       if (m.frame instanceof ImageBitmap) return m.frame;
       const bmp = await createImageBitmap(m.frame);
       m.frame.close();
@@ -382,12 +405,13 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
         inFlight = true;
         const t0 = performance.now();
         const ts = monotonic(frame.timestamp / 1000);
-        let lm: Float32Array | null = null;
+        let lm: Float32Array | null = null, yaw = 0;
         try {
-          lm = landmarksOf(landmarker.detectForVideo(frame as unknown as HTMLVideoElement, ts));
+          const result = landmarker.detectForVideo(frame as unknown as HTMLVideoElement, ts);
+          lm = landmarksOf(result); yaw = yawAt(result);
           if (lm) segment(frame, frame.displayWidth, frame.displayHeight, ts);
         } catch { /* keep the frame unswapped */ }
-        request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'frame', id, frame, landmarks: lm, ts }), [frame])
+        request<Extract<ToMain, { type: 'frame' }>>((id) => ({ type: 'frame', id, frame, landmarks: lm, yaw, ts }), [frame])
           // Don't wait on write(): it can stay pending while the sink is idle, which would stall the loop.
           .then((m) => { measured(t0); writer.write(m.frame as VideoFrame).catch(() => (m.frame as VideoFrame).close()); })
           .catch((err) => opts.onLog?.(`frame dropped: ${err.message}`))

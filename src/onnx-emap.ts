@@ -98,3 +98,20 @@ export function cosine(a: Float32Array, b: Float32Array) {
   for (let i = 0; i < x.length; i++) s += x[i] * y[i];
   return s;
 }
+
+/** One photo's identity and the head turn it was taken at (degrees, see yawOf). */
+export type PoseLatent = { latent: Float32Array; yaw: number };
+
+/**
+ * The identity for a face turned `yaw` degrees: the photos' identities blended by angle, so a face turned to the
+ * side gets the identity measured on a photo turned the same way. Between two photos it blends by how close each
+ * is; past the most turned photo it uses that one. `views` must be sorted by yaw.
+ */
+export function latentAt(views: PoseLatent[], yaw: number): Float32Array {
+  if (views.length === 1 || yaw <= views[0].yaw) return views[0].latent;
+  for (let i = 1; i < views.length; i++) {
+    const a = views[i - 1], b = views[i];
+    if (yaw <= b.yaw) return blendLatents(a.latent, b.latent, (yaw - a.yaw) / (b.yaw - a.yaw || 1));
+  }
+  return views[views.length - 1].latent;
+}

@@ -10,8 +10,8 @@ import type { Mesh } from './mesh.ts';
 import { candidates, sessionOptions, type Backend, type Capabilities } from './backend.ts';
 import { VectorFilter } from './filters.ts';
 import { FACE_OVAL, apply, keyPoints, similarity, template, toCanvas, type Affine, type Point } from './geometry.ts';
-import { blendLatents, extractEmap, identityLatent } from './onnx-emap.ts';
-import type { FaceMask, ToMain, ToWorker } from './protocol.ts';
+import { blendLatents, extractEmap, identityLatent, latentAt, type PoseLatent } from './onnx-emap.ts';
+import type { FaceMask, IdentityView, ToMain, ToWorker } from './protocol.ts';
 
 const SIZE = 128;
 const COLOR_MATCH = 0.3; // pull the swapped face's mean colour this far towards the original light (1 = fully: loses skin tone)
@@ -26,9 +26,11 @@ let backend: Backend = 'wasm';
 let caps: Capabilities;
 let emap: Float32Array;
 
-// Identity: the latent being shown, a morph in progress, and how strongly the swap is applied (fades on/off).
-let latentFrom: Float32Array | null = null;
-let latentTo: Float32Array | null = null;
+// Identity: the one being shown (one latent per photo angle), a morph in progress, and how strongly the swap is
+// applied (fades on/off).
+let latentFrom: PoseLatent[] | null = null;
+let latentTo: PoseLatent[] | null = null;
+let liveYaw = 0; // the live face's head turn, smoothed
 let morphStart = 0, morphMs = 0;
 let strengthFrom = 0, strengthTo = 0, strengthStart = 0, strengthMs = 0;
 
@@ -63,13 +65,19 @@ const post = (m: ToMain, transfer: Transferable[] = []) => (self as unknown as W
 const ease = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
 const progress = (start: number, ms: number) => (ms <= 0 ? 1 : (performance.now() - start) / ms);
 
-function currentLatent() {
+/** The identity for a face turned `yaw` degrees, mid-morph if one is running. */
+function currentLatent(yaw: number) {
   if (!latentTo) return null;
-  if (!latentFrom) return latentTo;
+  const to = latentAt(latentTo, yaw);
+  if (!latentFrom) return to;
   const t = ease(progress(morphStart, morphMs));
-  if (t >= 1) { latentFrom = null; return latentTo; }
-  return blendLatents(latentFrom, latentTo, t);
+  if (t >= 1) { latentFrom = null; return to; }
+  return blendLatents(latentAt(latentFrom, yaw), to, t);
 }
+/** Photo identities → swap latents, sorted by angle. */
+const poseLatents = (views: IdentityView[]): PoseLatent[] =>
+  views.map((v) => ({ latent: identityLatent(v.embedding, emap), yaw: v.yaw })).sort((a, b) => a.yaw - b.yaw);
+const YAW_FOLLOW = 0.3; // how quickly the identity follows a turning head (per frame): steady, without lagging the turn
 const currentStrength = () => strengthFrom + (strengthTo - strengthFrom) * ease(progress(strengthStart, strengthMs));
 
 async function plainRunner(bytes: ArrayBuffer, b: Backend): Promise<Runner> {
@@ -223,7 +231,7 @@ async function swapJob(local: Float32Array, latent: Float32Array) {
   compositor.setFace(face, uv);
 }
 
-function render(frame: VideoFrame | ImageBitmap, lm: Float32Array | null, ts: number) {
+function render(frame: VideoFrame | ImageBitmap, lm: Float32Array | null, yaw: number, ts: number) {
   const w = 'displayWidth' in frame ? frame.displayWidth : frame.width;
   const h = 'displayHeight' in frame ? frame.displayHeight : frame.height;
   const strength = currentStrength();
@@ -232,8 +240,9 @@ function render(frame: VideoFrame | ImageBitmap, lm: Float32Array | null, ts: nu
     const n = lm.length / 3, raw = new Array<number>(n * 2);
     for (let i = 0; i < n; i++) { raw[i * 2] = lm[i * 3] * w; raw[i * 2 + 1] = lm[i * 3 + 1] * h; }
     points = Float32Array.from(smooth.filter(raw, ts));
+    liveYaw += (yaw - liveYaw) * YAW_FOLLOW;
     // Start a swap when the model is free; frames keep flowing meanwhile, drawn with the last result.
-    const latent = currentLatent();
+    const latent = currentLatent(liveYaw);
     if (strength > 0.001 && !busy && latent && swapper) {
       busy = true;
       const local = snapshot(liveRegion, frame, points);
@@ -272,26 +281,28 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
     } else if (m.type === 'arcface') {
       arcfaceBytes = m.bytes;
     } else if (m.type === 'identity') {
-      const embedding = m.embedding ?? (m.image && m.landmarks ? await identityFromImage(m.image, m.landmarks) : null);
+      const embedding = m.views ? null : m.embedding ?? (m.image && m.landmarks ? await identityFromImage(m.image, m.landmarks) : null);
       m.image?.close();
-      if (!embedding) throw new Error('No face found in that picture.');
-      const next = identityLatent(embedding, emap);
-      latentFrom = latentTo ? currentLatent() : null;
-      latentTo = next;
+      const views = m.views ?? (embedding ? [{ embedding, yaw: 0 }] : null);
+      if (!views?.length) throw new Error('No face found in that picture.');
+      // Mid-morph, the face on screen is a blend: carry it on as a single-angle identity.
+      latentFrom = !latentTo ? null : latentFrom ? [{ latent: currentLatent(liveYaw)!, yaw: 0 }] : latentTo;
+      latentTo = poseLatents(views);
       morphStart = performance.now(); morphMs = latentFrom ? m.morphMs : 0;
       if (strengthTo === 0) { strengthFrom = currentStrength(); strengthTo = 1; strengthStart = performance.now(); strengthMs = m.morphMs || 300; }
-      post({ type: 'identity', id: m.id, embedding }, [embedding.buffer]);
+      // The most frontal photo's identity, to store.
+      const front = views.reduce((a, b) => (Math.abs(b.yaw) < Math.abs(a.yaw) ? b : a)).embedding.slice();
+      post({ type: 'identity', id: m.id, embedding: front }, [front.buffer]);
     } else if (m.type === 'embed') {
       const embeddings: Float32Array[] = [];
       for (const lm of m.faces) embeddings.push(await identityFromImage(m.image, lm));
       m.image.close();
       post({ type: 'embeddings', id: m.id, embeddings }, embeddings.map((e) => e.buffer));
     } else if (m.type === 'still') {
-      const latent = currentLatent();
       const w = m.frame.width, h = m.frame.height;
       const faces = [];
       for (const f of m.faces) {
-        const target = f.identity ? identityLatent(f.identity, emap) : latent;
+        const target = f.identity ? latentAt(poseLatents(f.identity), f.yaw) : currentLatent(f.yaw);
         if (!target) continue;
         const local = snapshot(stillRegion, m.frame, f.points);
         const { image, uv } = await swapAt(stillRegion, local, target, f.key);
@@ -305,7 +316,7 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
     } else if (m.type === 'strength') {
       strengthFrom = currentStrength(); strengthTo = m.value; strengthStart = performance.now(); strengthMs = m.ms;
     } else if (m.type === 'frame') {
-      const canvas = render(m.frame, m.landmarks, m.ts);
+      const canvas = render(m.frame, m.landmarks, m.yaw, m.ts);
       const isVideoFrame = typeof VideoFrame !== 'undefined' && m.frame instanceof VideoFrame;
       if (isVideoFrame) {
         const vf = new VideoFrame(canvas, { timestamp: (m.frame as VideoFrame).timestamp });

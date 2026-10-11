@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { apply, invert, keyPoints, similarity, template, type Affine, type Point } from './geometry.ts';
+import { apply, invert, keyPoints, similarity, template, yawOf, type Affine, type Point } from './geometry.ts';
 import { OneEuro } from './filters.ts';
-import { blendLatents, cosine, extractEmap, identityLatent, normalize } from './onnx-emap.ts';
+import { blendLatents, cosine, extractEmap, identityLatent, latentAt, normalize } from './onnx-emap.ts';
 
 const close = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
 
@@ -91,4 +91,31 @@ test('photo checks: a sharp, frontal, well-lit face has no issues; blur, size an
   assert.ok(faceIssues(pts, checker, 112).includes('small'));
   set(263, 200, 100); set(1, 210, 150);
   assert.ok(faceIssues(pts, checker, 112).includes('turned'));
+});
+
+test('yaw: read from a pose matrix, unaffected by tilt and nod', () => {
+  // Column-major 4×4 of R = Rz(roll)·Ry(yaw)·Rx(pitch), as MediaPipe gives it.
+  const pose = (yaw: number, roll: number, pitch: number) => {
+    const [y, r, p] = [yaw, roll, pitch].map((d) => (d * Math.PI) / 180);
+    const mul = (A: number[][], B: number[][]) => A.map((row) => B[0].map((_, c) => row.reduce((s, v, k) => s + v * B[k][c], 0)));
+    const Rz = [[Math.cos(r), -Math.sin(r), 0], [Math.sin(r), Math.cos(r), 0], [0, 0, 1]];
+    const Ry = [[Math.cos(y), 0, Math.sin(y)], [0, 1, 0], [-Math.sin(y), 0, Math.cos(y)]];
+    const Rx = [[1, 0, 0], [0, Math.cos(p), -Math.sin(p)], [0, Math.sin(p), Math.cos(p)]];
+    const R = mul(mul(Rz, Ry), Rx), m = new Float32Array(16);
+    for (let row = 0; row < 3; row++) for (let col = 0; col < 3; col++) m[col * 4 + row] = R[row][col];
+    m[15] = 1;
+    return m;
+  };
+  for (const yaw of [-40, 0, 25]) { close(yawOf(pose(yaw, 0, 0)), yaw, 1e-4); close(yawOf(pose(yaw, 20, -15)), yaw, 1e-4); }
+});
+
+test('pose blend: matching photo at its angle, halfway between two, clamped past the ends', () => {
+  const unit = (i: number) => { const v = new Float32Array(512); v[i] = 1; return v; };
+  const views = [{ latent: unit(0), yaw: -30 }, { latent: unit(1), yaw: 0 }, { latent: unit(2), yaw: 28 }];
+  assert.deepEqual(latentAt(views, 0), views[1].latent);
+  assert.equal(latentAt(views, -70), views[0].latent);
+  assert.equal(latentAt(views, 60), views[2].latent);
+  const mid = latentAt(views, 14);
+  close(mid[1], mid[2], 1e-6); close(mid[0], 0);
+  assert.equal(latentAt([views[1]], 45), views[1].latent);
 });

@@ -74,6 +74,11 @@ const [face] = await swap.findFaces(photo);            // biggest first; face.is
 const embedding = await swap.setIdentity({ image: photo, face });
 // Save `embedding` (512 numbers) and pass { embedding } next time: no identity model download needed.
 
+// More accurate when the head turns: the same person facing the camera, turned a little left, turned a little right.
+// Each frame uses the photo (or blend of two) closest to the face's own head turn.
+const views = await Promise.all([front, left, right].map((image) => swap.identityView({ image })));
+await swap.setIdentity({ views });                      // views also work in swapVideo's map, and can be stored
+
 swap.setIdentity({ image: '/faces/other.png' }, { morphMs: 1500 });  // morph while running
 swap.setStrength(0, 400);                                            // fade back to the real face
 swap.dispose();

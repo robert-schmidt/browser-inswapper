@@ -1,4 +1,4 @@
-import { createFaceSwap, ISSUE_TEXT, KNOWN_SHA256, probe, type Backend, type FaceSwap, type FoundFace, type VideoScan } from '../src/index.ts';
+import { createFaceSwap, ISSUE_TEXT, KNOWN_SHA256, probe, type Backend, type FaceSwap, type FoundFace, type IdentityView, type VideoScan } from '../src/index.ts';
 
 // Models: local files on a dev machine (see models/README.md), public mirrors elsewhere (the hosted demo).
 // ?models=https://…/ points at your own copies. Every file is checked against its SHA-256 either way.
@@ -18,7 +18,7 @@ const output = $<HTMLVideoElement>('output'), original = $<HTMLVideoElement>('or
 const status = $('status'), log = $('log'), progress = $<HTMLProgressElement>('progress');
 const backendSel = $<HTMLSelectElement>('backend'), videoBackend = $<HTMLSelectElement>('videoBackend'), morph = $<HTMLInputElement>('morph'), strength = $<HTMLInputElement>('strength');
 
-type Identity = { image: string; face?: FoundFace } | null;
+type Identity = { image: string; face?: FoundFace } | { views: IdentityView[] } | null;
 let swap: FaceSwap | null = null;
 let input: MediaStreamTrack | null = null;
 let swapped: MediaStreamTrack | null = null;
@@ -130,14 +130,15 @@ backendSel.onchange = async () => {
 const faces = document.querySelector<HTMLElement>('.faces')!;
 
 // Faces that people in a video can become: the presets, plus every photo added.
-type Target = { key: string; label: string; image: string; face?: FoundFace; thumb: CanvasImageSource };
+// `views`: the front photo plus side photos of the same person, once any are added (see addSides).
+type Target = { key: string; label: string; image: string; face?: FoundFace; thumb: CanvasImageSource; views?: IdentityView[] };
 const targets: Target[] = [...faces.querySelectorAll<HTMLButtonElement>('.face[data-face]')]
   .filter((b) => b.dataset.face)
   .map((b) => ({ key: b.dataset.face!, label: b.textContent!.trim(), image: b.dataset.face!, thumb: b.querySelector('img')! }));
 let identityKey: string | null = null;
 const select = (b: HTMLButtonElement) => faces.querySelectorAll('.face').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
 for (const b of faces.querySelectorAll<HTMLButtonElement>('.face')) {
-  b.onclick = () => { select(b); identityKey = b.dataset.face || null; void choose(b.dataset.face ? { image: b.dataset.face } : null); };
+  b.onclick = () => { select(b); identityKey = b.dataset.face || null; showSides(); void choose(b.dataset.face ? { image: b.dataset.face } : null); };
 }
 
 // Your own photo: find the faces, let the person pick one and see what might make it less accurate.
@@ -258,18 +259,80 @@ function showPhoto(url: string, found: FoundFace[]) {
     thumb.style.cssText = 'width:64px;height:64px;border-radius:8px';
     chip.append(thumb, 'Your photo');
     const image = sources.get(picked)!;
-    const id: Identity = { image, face: picked };
     const key = `photo-${targets.length}`;
-    targets.push({ key, label: `Your photo ${targets.filter((t) => t.key.startsWith('photo-')).length + 1}`, image, face: picked, thumb });
-    chip.onclick = () => { select(chip); identityKey = key; void choose(id); };
+    const target: Target = { key, label: `Your photo ${targets.filter((t) => t.key.startsWith('photo-')).length + 1}`, image, face: picked, thumb };
+    targets.push(target);
+    chip.onclick = () => { select(chip); identityKey = key; showSides(); void choose(identityOf(target)); };
     faces.append(chip);
     select(chip);
     identityKey = key;
-    void choose(id);
+    showSides();
+    void choose(identityOf(target));
     renderMapping();
   };
   dialog.showModal();
 }
+
+// Side photos: the front photo alone gives every head turn the identity measured face-on, and the swap loses
+// likeness when the head turns. With a photo turned each way, faces turned to the side use the matching one.
+const sides = $('sides'), sideLog = $('sideLog');
+const identityOf = (t: Target): Identity => (t.views && t.views.length > 1 ? { views: t.views } : { image: t.image, face: t.face });
+const current = () => targets.find((t) => t.key === identityKey && t.key.startsWith('photo-'));
+const cosine = (a: Float32Array, b: Float32Array) => { let d = 0, x = 0, y = 0; for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; x += a[i] * a[i]; y += b[i] * b[i]; } return d / Math.sqrt(x * y); };
+const MIN_TURN = 10, MAX_TURN = 60; // degrees: less is just another front photo; more is a profile, where the identity model is unreliable
+const SAME_PERSON = 0.3; // identity similarity below this: not the same person (or not a usable photo)
+const thumbs = new Map<IdentityView, HTMLCanvasElement>();
+
+function showSides() {
+  const t = current();
+  sides.hidden = !t;
+  if (!t) return;
+  $('sidesFor').textContent = t.label;
+  const views = t.views ?? [];
+  const front = views.find((v) => !thumbs.has(v));
+  const turned = (v: IdentityView) => v.yaw - (front?.yaw ?? 0);
+  $('sideViews').replaceChildren(...views.filter((v) => thumbs.has(v)).map((v) => {
+    const fig = document.createElement('figure');
+    fig.append(thumbs.get(v)!, Object.assign(document.createElement('figcaption'), { textContent: `${Math.round(Math.abs(turned(v)))}° ${turned(v) > 0 ? '→' : '←'}` }));
+    return fig;
+  }));
+  const n = new Set(views.filter((v) => thumbs.has(v)).map((v) => Math.sign(turned(v)))).size;
+  if (!sideLog.dataset.busy) sideLog.textContent = n === 2 ? 'Both sides added: faces turned to the side now use these photos.' : n === 1 ? 'One side added. Add one turned the other way too.' : '';
+}
+
+$<HTMLInputElement>('sideUpload').onchange = async (e) => {
+  const el = e.target as HTMLInputElement, files = [...(el.files ?? [])];
+  el.value = '';
+  const t = current();
+  if (!t || !files.length || !swap) return;
+  const notes: string[] = [];
+  sideLog.dataset.busy = '1';
+  sideLog.textContent = 'Reading the photos…';
+  try {
+    t.views ??= [await swap.identityView({ image: t.image, face: t.face })];
+    const front = t.views[0];
+    for (const file of files) {
+      const url = await upright(file);
+      const [f] = await swap.findFaces(url);
+      if (!f) { notes.push(`${file.name}: no face found.`); continue; }
+      const view = await swap.identityView({ image: url, face: f });
+      const turn = view.yaw - front.yaw;
+      if (Math.abs(turn) < MIN_TURN) { notes.push(`${file.name}: faces the camera like the front photo. Turn the head a little more (about a quarter turn).`); continue; }
+      if (Math.abs(turn) > MAX_TURN) { notes.push(`${file.name}: turned too far (${Math.round(Math.abs(turn))}°). Turn a little less, so both eyes still show.`); continue; }
+      if (cosine(view.embedding, front.embedding) < SAME_PERSON) { notes.push(`${file.name}: doesn't look like the same person as the front photo.`); continue; }
+      const thumb = document.createElement('canvas');
+      thumb.width = thumb.height = 64;
+      thumb.getContext('2d')!.drawImage(f.preview, 0, 0, 64, 64);
+      thumbs.set(view, thumb);
+      // One photo per side: a newer one replaces the older.
+      t.views = [...t.views.filter((v) => v === front || Math.sign(v.yaw - front.yaw) !== Math.sign(turn)), view];
+    }
+  } catch (err) { notes.push((err as Error).message); }
+  delete sideLog.dataset.busy;
+  showSides();
+  if (notes.length) sideLog.textContent = notes.join(' ');
+  if (identityKey === t.key) void choose(identityOf(t), 0);
+};
 
 morph.oninput = () => { $('morphOut').textContent = `${(Number(morph.value) / 1000).toFixed(1)} s`; };
 strength.oninput = () => {
@@ -432,10 +495,11 @@ vGo.onclick = async () => {
   vResult.hidden = true; vDownload.hidden = true;
   vStatus.textContent = 'Preparing the faces…';
   try {
-    const map: Record<number, Float32Array | null> = {};
+    const map: Record<number, Float32Array | IdentityView[] | null> = {};
     for (const [person, key] of mapping) {
       const t = targets.find((x) => x.key === key);
       if (!t) { map[person] = null; continue; }
+      if (t.views && t.views.length > 1) { map[person] = t.views; continue; }
       if (!identities.has(key)) identities.set(key, await swap.identityOf({ image: t.image, face: t.face }));
       map[person] = identities.get(key)!;
     }
