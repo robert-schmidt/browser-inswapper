@@ -104,7 +104,7 @@ const MP_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/was
 
 export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   const caps = await probe();
-  const wanted = opts.backend && opts.backend !== 'auto' ? opts.backend : rememberedBackend() ?? 'auto';
+  const wanted = opts.backend && opts.backend !== 'auto' ? opts.backend : rememberedBackend(caps) ?? 'auto';
   // Model precision follows the likely backend: fp16 for GPUs with half precision, fp32 otherwise.
   const likely: Backend = wanted !== 'auto' ? wanted : caps.webgpu.available ? 'webgpu' : caps.webnn ? 'webnn' : 'wasm';
   const fp = swapperPrecision(likely, caps);
@@ -192,7 +192,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
   send({ type: 'init', swapper: swapBytes, backend: wanted, caps, wasmPaths: opts.ortWasmPaths ?? ORT_CDN, mesh: buildMesh(FaceLandmarker.FACE_LANDMARKS_TESSELATION, FACE_OVAL), masks: segWorker ? masks.port2 : undefined },
     segWorker ? [swapBytes, masks.port2] : [swapBytes]);
   const { backend } = await ready;
-  if (wanted === 'auto') rememberBackend(backend); // a forced choice isn't a benchmark result
+  if (wanted === 'auto') rememberBackend(backend, caps); // a forced choice isn't a benchmark result
 
   let arcfaceSent = false;
   type Detection = { faceLandmarks: { x: number; y: number; z: number }[][]; facialTransformationMatrixes?: { data: ArrayLike<number> }[] };

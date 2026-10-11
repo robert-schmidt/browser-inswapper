@@ -82,6 +82,9 @@ async function start(track: MediaStreamTrack) {
   stopRecording();
   input?.stop(); swapped?.stop();
   input = track;
+  // The stage takes the source's shape (a phone held upright gives portrait video), once its size is known.
+  const fit = () => { if (original.videoWidth) $('stage').style.aspectRatio = `${original.videoWidth} / ${original.videoHeight}`; };
+  original.onloadedmetadata = original.onresize = fit;
   original.srcObject = new MediaStream([track]); original.hidden = false;
   output.srcObject = new MediaStream([track]);
   if (!(await ensureEngine())) return;
@@ -112,7 +115,9 @@ async function sampleTrack() {
 
 $('camera').onclick = async () => {
   try {
-    const video = { width: 1280, height: 720 };
+    // Phones: the front camera at 640×480 (a quarter of the pixels to track and draw; the swap itself is 128×128 anyway).
+    const phone = matchMedia('(pointer: coarse) and (max-width: 900px)').matches;
+    const video = { facingMode: 'user', width: { ideal: phone ? 640 : 1280 }, height: { ideal: phone ? 480 : 720 } };
     // With the microphone for recordings; without it if there's none or it's refused.
     const s = await navigator.mediaDevices.getUserMedia({ video, audio: true }).catch(() => navigator.mediaDevices.getUserMedia({ video }));
     mic?.stop(); mic = s.getAudioTracks()[0] ?? null;

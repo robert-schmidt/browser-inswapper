@@ -58,9 +58,16 @@ export function sessionOptions(backend: Backend, c: Capabilities) {
 }
 
 const KEY = 'heisenbert-faceswap:backend';
-export function rememberedBackend(): Backend | null {
-  try { const v = localStorage.getItem(KEY); return v === 'webgpu' || v === 'webnn' || v === 'wasm' ? v : null; } catch { return null; }
+// What the benchmark ran on: a result only stands while this stays the same, so turning WebNN on, a new GPU or a
+// browser update gets a fresh benchmark (a bare remembered name kept WebGPU after WebNN was switched on).
+const deviceKey = (c: Capabilities) =>
+  [c.webgpu.available, c.webgpu.vendor, c.webgpu.architecture, c.webgpu.f16, c.webnn, c.wasmThreads, typeof navigator !== 'undefined' ? navigator.userAgent : ''].join('|');
+export function rememberedBackend(c: Capabilities): Backend | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(KEY) ?? 'null') as { backend?: string; device?: string } | null;
+    return v?.device === deviceKey(c) && (v.backend === 'webgpu' || v.backend === 'webnn' || v.backend === 'wasm') ? v.backend : null;
+  } catch { return null; }
 }
-export function rememberBackend(b: Backend) {
-  try { localStorage.setItem(KEY, b); } catch { /* private mode */ }
+export function rememberBackend(b: Backend, c: Capabilities) {
+  try { localStorage.setItem(KEY, JSON.stringify({ backend: b, device: deviceKey(c) })); } catch { /* private mode */ }
 }

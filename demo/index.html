@@ -12,7 +12,7 @@
     main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
     h1 { font-size: 1.25rem; margin: 0; }
     header p { margin: 4px 0 20px; color: var(--mute); }
-    .stage { position: relative; aspect-ratio: 16 / 9; background: #000; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); }
+    .stage { position: relative; aspect-ratio: 16 / 9; max-height: 75vh; margin: 0 auto; background: #000; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); }
     .stage video { width: 100%; height: 100%; object-fit: contain; display: block; }
     #original { position: absolute; right: 12px; bottom: 12px; width: 22%; height: auto; border-radius: 8px; border: 1px solid var(--line); }
     #status { position: absolute; left: 12px; top: 12px; padding: 4px 10px; border-radius: 999px; background: #000a; font-size: 13px; }
@@ -81,7 +81,7 @@
     <p>Real-time face swap that runs entirely in your browser. Nothing is uploaded. Built for <a href="https://heisenbert.com">heisenbert.com</a>.</p>
   </header>
 
-  <div class="stage">
+  <div class="stage" id="stage">
     <video id="output" autoplay playsinline muted></video>
     <video id="original" autoplay playsinline muted hidden></video>
     <span id="status">Choose a video source</span>
@@ -198,8 +198,9 @@
     </dl>
   </section>
 
-  <p class="note">The first start downloads about 300 MB of models (they stay cached in your browser). Works best in
-    Chrome or Edge on a computer with a recent graphics card or Apple Silicon.</p>
+  <p class="note">The first start downloads about 300 MB of models (they stay cached in your browser), so use Wi-Fi on
+    a phone. Works best in Chrome or Edge on a computer with a recent graphics card or Apple Silicon; recent phones
+    work too (Chrome on Android, Safari on iPhone), more slowly.</p>
 
   <footer>
     <a href="https://github.com/robert-schmidt/heisenbert-faceswap">Source on GitHub</a>.
