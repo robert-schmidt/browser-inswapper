@@ -89,3 +89,10 @@ export function yawOf(matrix: ArrayLike<number>): number {
   // The head's left-right axis (first column) leaves the image plane by sin(yaw), whatever the tilt or nod.
   return (Math.asin(Math.max(-1, Math.min(1, -matrix[2]))) * 180) / Math.PI;
 }
+
+/** Normalised landmarks (x, y, z per point, as findFaces gives them) → pixel x/y pairs, as the swap takes them. */
+export function toPixels(lm: ArrayLike<number>, width: number, height: number): Float32Array {
+  const out = new Float32Array((lm.length / 3) * 2);
+  for (let i = 0; i < out.length / 2; i++) { out[i * 2] = lm[i * 3] * width; out[i * 2 + 1] = lm[i * 3 + 1] * height; }
+  return out;
+}

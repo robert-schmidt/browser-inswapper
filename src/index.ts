@@ -11,7 +11,7 @@ import { probe, rememberedBackend, rememberBackend, swapperPrecision, type Backe
 import { DEFAULT_LANDMARKER, DEFAULT_SEGMENTER, loadModel, type ModelSet, type ModelSpec, type Progress } from './models.ts';
 import type { ToMain, ToWorker } from './protocol.ts';
 import { buildMesh } from './mesh.ts';
-import { EYES, FACE_OVAL, MOUTH, keyPoints, similarity, template, toCanvas, yawOf } from './geometry.ts';
+import { EYES, FACE_OVAL, MOUTH, keyPoints, similarity, template, toCanvas, toPixels, yawOf } from './geometry.ts';
 import { faceIssues, type FaceIssue } from './faces.ts';
 import type { FaceMask, IdentityView } from './protocol.ts';
 import type { SwapVideoOptions, VideoEngine, VideoInfo, VideoRange, VideoScan } from './video.ts';
@@ -96,6 +96,13 @@ export type FaceSwap = {
   process(track: MediaStreamTrack, opts?: { maxFps?: number }): MediaStreamTrack;
   /** One frame through the swap, for apps with their own render loop. */
   processFrame(source: CanvasImageSource | VideoFrame, timestampMs?: number): Promise<ImageBitmap>;
+  /**
+   * A photo, swapped in one pass: no smoothing, crossfade or colour carried over from other frames, so it's the
+   * call for stills (processFrame is for live video and swaps one face). Each entry swaps one face from `findFaces`
+   * to an identity: an embedding (from setIdentity or identityOf) or views (from identityView). Faces left out stay
+   * as they are.
+   */
+  swapPhoto(image: ImageBitmapSource | string, swaps: { face: FoundFace; identity: Float32Array | IdentityView[] }[]): Promise<ImageBitmap>;
   dispose(): void;
 };
 
@@ -357,6 +364,16 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
 
     setStrength(value, ms = 400) { send({ type: 'strength', value: Math.max(0, Math.min(1, value)), ms }); },
 
+    async swapPhoto(image, swaps) {
+      const bitmap = await toBitmap(image), call = ++photoCalls;
+      return videoEngine.still(bitmap, swaps.map(({ face, identity }, i) => ({
+        key: `photo-${call}-${i}`, // a fresh key per photo: the worker smooths colour per key, and photos aren't a sequence
+        points: toPixels(face.landmarks, bitmap.width, bitmap.height),
+        yaw: face.yaw,
+        identity: identity instanceof Float32Array ? [{ embedding: identity.slice(), yaw: 0 }] : identity.map((v) => ({ embedding: v.embedding.slice(), yaw: v.yaw })),
+      })), null);
+    },
+
     async processFrame(source, timestampMs = performance.now()) {
       const ts = monotonic(timestampMs);
       const result = landmarker.detectForVideo(source as HTMLVideoElement, ts), lm = landmarksOf(result), yaw = yawAt(result);
@@ -388,7 +405,7 @@ export async function createFaceSwap(opts: FaceSwapOptions): Promise<FaceSwap> {
     },
   };
 
-  let stopped = false;
+  let stopped = false, photoCalls = 0;
   const outputs = new Set<MediaStreamTrack>();
 
   // Chrome/Edge: frames flow as VideoFrames; at most one in the worker at a time (late frames are dropped,
