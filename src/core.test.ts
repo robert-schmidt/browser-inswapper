@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { apply, invert, keyPoints, similarity, template, yawOf, type Affine, type Point } from './geometry.ts';
+import { apply, invert, keyPoints, similarity, template, toPixels, yawOf, type Affine, type Point } from './geometry.ts';
 import { FaceFilter, OneEuro, VectorFilter } from './filters.ts';
 import { blendLatents, cosine, extractEmap, identityLatent, latentAt, normalize } from './onnx-emap.ts';
 
@@ -196,4 +196,8 @@ test('models download into one buffer, with or without a length header', async (
     }), { headers: length ? { 'content-length': length } : {} });
     try { assert.deepEqual(new Uint8Array(await loadModel('m', { url: 'x' })), data); } finally { globalThis.fetch = real; }
   }
+});
+
+test('toPixels turns normalised (x, y, z) landmarks into pixel x/y pairs for swapPhoto', () => {
+  assert.deepEqual([...toPixels([0.5, 0.25, 0.1, 1, 0, -0.2], 200, 100)], [100, 25, 200, 0]);
 });

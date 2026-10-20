@@ -84,6 +84,17 @@ swap.setStrength(0, 400);                                            // fade bac
 swap.dispose();
 ```
 
+### Photos
+
+`swapPhoto` swaps a still in one pass, without the smoothing and crossfade that live video uses, and can give
+every face its own identity:
+
+```ts
+const faces = await swap.findFaces(poster);                       // the faces to replace, biggest first
+const guest = await swap.identityOf({ image: photo });            // who goes in
+const result = await swap.swapPhoto(poster, faces.map((face) => ({ face, identity: guest })));  // an ImageBitmap
+```
+
 ### Video files
 
 ```ts
